@@ -7,7 +7,6 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-import plotly.graph_objects as go
 from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -137,38 +136,24 @@ if view == "📊 Heatmap por fecha":
         if cls not in sub.columns:
             cls = "J"
 
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            dep = FLIGHT_TIMES.get(vuelo, "")
-            st.metric(vuelo, dep, f"clase {cls}")
+        dep = FLIGHT_TIMES.get(vuelo, "")
+        st.markdown(f"**{vuelo}** {dep} — clase `{cls}`")
 
-        with col2:
-            vals  = sub[cls].tolist()
-            dates = sub["Fecha vuelo"].tolist()
+        # Build a single-row dataframe for display
+        dates = [d.split(" ")[0] if " " in d else d for d in sub["Fecha vuelo"].tolist()]
+        vals  = sub[cls].tolist()
+        row_df = pd.DataFrame([vals], columns=dates)
 
-            fig = go.Figure(go.Heatmap(
-                z=[vals],
-                x=dates,
-                y=[vuelo],
-                colorscale=[
-                    [0,   "#FCEBEB"],
-                    [0.15,"#F7C1C1"],
-                    [0.45,"#FAC775"],
-                    [0.85,"#C0DD97"],
-                    [1,   "#4CAF50"],
-                ],
-                zmin=0, zmax=7,
-                text=[[str(v) for v in vals]],
-                texttemplate="%{text}",
-                showscale=False,
-                hovertemplate="%{x}<br>" + cls + " = %{z}<extra></extra>",
-            ))
-            fig.update_layout(
-                height=90, margin=dict(l=0,r=0,t=0,b=0),
-                xaxis=dict(showgrid=False, tickfont=dict(size=10)),
-                yaxis=dict(showticklabels=False),
-            )
-            st.plotly_chart(fig, use_container_width=True, key=f"hm_{vuelo}")
+        def color_cell(val):
+            if val >= 7:   return "background-color:#4CAF50;color:white;font-weight:bold"
+            elif val >= 5: return "background-color:#C0DD97;color:#1a3a00;font-weight:bold"
+            elif val >= 3: return "background-color:#FAC775;color:#4a2800;font-weight:bold"
+            elif val >= 1: return "background-color:#F7C1C1;color:#5a0000;font-weight:bold"
+            else:          return "background-color:#FCEBEB;color:#8a0000;font-weight:bold"
+
+        styled = row_df.style.applymap(color_cell).format("{:.0f}")
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.divider()
 
 # ── Vista 2: Curva vs tiempo ──────────────────────────────────────────────────
 else:
@@ -188,9 +173,7 @@ else:
 
     df_h = df_h[df_h["dow"].isin(sel_days2)] if sel_days2 else df_h
 
-    colors = ["#185FA5","#D85A30","#0F6E56","#993C1D","#6B3FA0","#B5860D"]
-
-    fig = go.Figure()
+    fig_data = {}
     for i, vuelo in enumerate(sel_flights):
         sub = df_h[df_h["Vuelo"] == vuelo].copy()
         if sub.empty:
@@ -198,48 +181,21 @@ else:
         cls = key_class(vuelo, route)
         if cls not in sub.columns:
             cls = "J"
-
         sub["bucket"] = (sub["hours_before"] / 6).round() * 6
         grouped = (sub.groupby("bucket")[cls]
                       .mean()
                       .reset_index()
-                      .sort_values("bucket", ascending=False))
-
+                      .sort_values("bucket", ascending=True))
         dep = FLIGHT_TIMES.get(vuelo, "")
-        color = colors[i % len(colors)]
-        fig.add_trace(go.Scatter(
-            x=grouped["bucket"],
-            y=grouped[cls],
-            mode="lines+markers",
-            name=f"{vuelo} {dep} ({cls})",
-            line=dict(color=color, width=2.5,
-                      dash="dash" if i % 2 == 1 else "solid"),
-            marker=dict(size=6, color=color),
-            hovertemplate="%{x:.0f}h antes<br>" + cls + " = %{y:.1f}<extra>" + vuelo + "</extra>",
-        ))
+        label = f"{vuelo} {dep} ({cls})"
+        fig_data[label] = grouped.set_index("bucket")[cls]
 
-    fig.update_layout(
-        height=400,
-        xaxis=dict(
-            autorange="reversed",
-            title="Horas antes del vuelo",
-            tickvals=list(range(0, 220, 24)),
-            ticktext=[f"{i}d" if i > 0 else "✈" for i in range(0, 10)],
-            gridcolor="rgba(128,128,128,0.1)",
-        ),
-        yaxis=dict(
-            title="Disponibilidad",
-            range=[0, 7.2],
-            tickvals=list(range(0, 8)),
-            ticktext=["0","1","2","3","4","5","6","7+"],
-            gridcolor="rgba(128,128,128,0.1)",
-        ),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        margin=dict(l=40, r=20, t=40, b=40),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    if fig_data:
+        chart_df = pd.DataFrame(fig_data)
+        chart_df.index.name = "Horas antes del vuelo"
+        chart_df = chart_df.sort_index(ascending=False)
+        st.line_chart(chart_df, use_container_width=True, height=400)
+        st.caption("← Más días antes del vuelo  |  Vuelo →  (leer de derecha a izquierda)")
 
     st.caption("⚠️ Con pocos días de datos las curvas son indicativas. Se van a afinar con más semanas de scraping.")
 
