@@ -193,11 +193,64 @@ else:
     if fig_data:
         chart_df = pd.DataFrame(fig_data)
         chart_df.index.name = "Horas antes del vuelo"
+        # Sort descending = más horas a la izquierda, vuelo a la derecha
         chart_df = chart_df.sort_index(ascending=False)
         st.line_chart(chart_df, use_container_width=True, height=400)
-        st.caption("← Más días antes del vuelo  |  Vuelo →  (leer de derecha a izquierda)")
+        st.caption("← Más días antes del vuelo  |  Momento del vuelo →")
 
     st.caption("⚠️ Con pocos días de datos las curvas son indicativas. Se van a afinar con más semanas de scraping.")
+
+    # ── Tabla de cortes temporales ────────────────────────────────────────────
+    st.subheader("Disponibilidad promedio por corte de tiempo")
+    st.caption("Promedio de la clase menos restrictiva según cuántas horas faltaban para el vuelo.")
+
+    CUTS = {
+        "7d": (7*24-12, 7*24+12),
+        "6d": (6*24-12, 6*24+12),
+        "5d": (5*24-12, 5*24+12),
+        "4d": (4*24-12, 4*24+12),
+        "3d": (3*24-12, 3*24+12),
+        "2d": (2*24-12, 2*24+12),
+        "1d": (1*24-12, 1*24+12),
+        "12h": (9, 15),
+        "6h":  (3, 9),
+        "3h":  (0, 5),
+    }
+
+    rows = []
+    for vuelo in sel_flights:
+        sub = df_h[df_h["Vuelo"] == vuelo].copy()
+        if sub.empty:
+            continue
+        cls = key_class(vuelo, route)
+        if cls not in sub.columns:
+            cls = "J"
+        dep = FLIGHT_TIMES.get(vuelo, "")
+        row = {"Vuelo": f"{vuelo} {dep}", "Clase": cls}
+        for cut_label, (lo, hi) in CUTS.items():
+            window = sub[(sub["hours_before"] >= lo) & (sub["hours_before"] <= hi)]
+            if len(window) > 0:
+                row[cut_label] = round(window[cls].mean(), 1)
+            else:
+                row[cut_label] = None
+        rows.append(row)
+
+    if rows:
+        tbl = pd.DataFrame(rows).set_index("Vuelo")
+
+        def color_cut(val):
+            if pd.isna(val):   return "color:#ccc"
+            if val >= 7:       return "background-color:#4CAF50;color:white;font-weight:bold"
+            elif val >= 5:     return "background-color:#C0DD97;color:#1a3a00;font-weight:bold"
+            elif val >= 3:     return "background-color:#FAC775;color:#4a2800;font-weight:bold"
+            elif val >= 1:     return "background-color:#F7C1C1;color:#5a0000;font-weight:bold"
+            else:              return "background-color:#FCEBEB;color:#8a0000;font-weight:bold"
+
+        num_cols = [c for c in tbl.columns if c != "Clase"]
+        styled_tbl = (tbl.style
+                        .map(color_cut, subset=num_cols)
+                        .format("{:.1f}", subset=num_cols, na_rep="—"))
+        st.dataframe(styled_tbl, use_container_width=True)
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()
