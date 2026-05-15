@@ -110,12 +110,12 @@ days_map  = {DOW_ES.get(d, d): d for d in all_days}
 with st.sidebar:
     sel_flights = st.multiselect("Vuelos", flights, default=flights[:2] if len(flights) >= 2 else flights)
     sel_days_es = st.multiselect(
-        "Día del vuelo",
+        "Día de la semana del vuelo",
         days_opts,
         default=days_opts,
-        help="Filtra las fechas de vuelo por día de semana. Afecta el heatmap."
+        help="Filtrá por día de semana del vuelo. Ej: seleccioná solo Domingo para ver el patrón de vuelos que salen un domingo."
     )
-    sel_days    = [days_map[d] for d in sel_days_es]
+    sel_days = [days_map[d] for d in sel_days_es]
 
 df_f = df[df["Vuelo"].isin(sel_flights) & df["dow"].isin(sel_days)]
 
@@ -163,7 +163,7 @@ if view == "📊 Heatmap por fecha":
 # ── Vista 2: Curva vs tiempo ──────────────────────────────────────────────────
 else:
     st.subheader(f"Disponibilidad vs tiempo antes del vuelo — {route}")
-    st.caption("Promedio de disponibilidad según horas restantes. Eje invertido: derecha = momento del vuelo.")
+    st.caption("Línea = promedio · Banda = rango entre percentil 25 y 75 de todas las observaciones.")
 
     df_h = compute_hours_before(df_f, FLIGHT_TIMES)
 
@@ -172,18 +172,18 @@ else:
         st.stop()
 
     with st.sidebar:
-        sel_days2_es = st.multiselect(
-            "Día del vuelo para curva y tabla",
-            days_opts,
-            default=sel_days_es,
-            key="curve_days",
-            help="Seleccioná uno o más días para ver cómo evoluciona la disponibilidad promedio antes de vuelos en esos días. Ej: solo 'Domingo' muestra el patrón típico de los vuelos del domingo."
-        )
-        sel_days2 = [days_map[d] for d in sel_days2_es]
+        sel_days2 = sel_days  # mismo filtro para curva y tabla
 
     df_h = df_h[df_h["dow"].isin(sel_days2)] if sel_days2 else df_h
 
-    fig_data = {}
+    COLORS = [
+        ("#185FA5", "rgba(24,95,165,0.15)"),
+        ("#D85A30", "rgba(216,90,48,0.15)"),
+        ("#0F6E56", "rgba(15,110,86,0.15)"),
+        ("#993C1D", "rgba(153,60,29,0.15)"),
+    ]
+
+    traces = []
     for i, vuelo in enumerate(sel_flights):
         sub = df_h[df_h["Vuelo"] == vuelo].copy()
         if sub.empty:
@@ -192,23 +192,62 @@ else:
         if cls not in sub.columns:
             cls = "J"
         sub["bucket"] = (sub["hours_before"] / 6).round() * 6
-        grouped = (sub.groupby("bucket")[cls]
-                      .mean()
-                      .reset_index()
-                      .sort_values("bucket", ascending=True))
-        dep = FLIGHT_TIMES.get(vuelo, "")
+        grouped = sub.groupby("bucket")[cls].agg(
+            mean="mean", q25=lambda x: x.quantile(0.25), q75=lambda x: x.quantile(0.75)
+        ).reset_index().sort_values("bucket", ascending=False)
+
+        color_line, color_band = COLORS[i % len(COLORS)]
+        dep   = FLIGHT_TIMES.get(vuelo, "")
         label = f"{vuelo} {dep} ({cls})"
-        fig_data[label] = grouped.set_index("bucket")[cls]
 
-    if fig_data:
-        chart_df = pd.DataFrame(fig_data)
-        chart_df.index.name = "Horas antes del vuelo"
-        # Sort descending = más horas a la izquierda, vuelo a la derecha
-        chart_df = chart_df.sort_index(ascending=False)
-        st.line_chart(chart_df, use_container_width=True, height=400)
-        st.caption("← Más días antes del vuelo  |  Momento del vuelo →")
+        # Upper band
+        traces.append({
+            "x": grouped["bucket"].tolist() + grouped["bucket"].tolist()[::-1],
+            "y": grouped["q75"].tolist() + grouped["q25"].tolist()[::-1],
+            "fill": "toself",
+            "fillcolor": color_band,
+            "line": {"color": "rgba(0,0,0,0)"},
+            "showlegend": False,
+            "hoverinfo": "skip",
+            "type": "scatter",
+            "mode": "lines",
+        })
+        # Mean line
+        traces.append({
+            "x": grouped["bucket"].tolist(),
+            "y": grouped["mean"].tolist(),
+            "type": "scatter",
+            "mode": "lines+markers",
+            "name": label,
+            "line": {"color": color_line, "width": 2.5},
+            "marker": {"size": 5, "color": color_line},
+            "hovertemplate": "%{x:.0f}h antes<br>Promedio = %{y:.1f}<extra>" + vuelo + "</extra>",
+        })
 
-    st.caption("⚠️ Con pocos días de datos las curvas son indicativas. Se van a afinar con más semanas de scraping.")
+    if traces:
+        layout = {
+            "height": 420,
+            "xaxis": {
+                "autorange": "reversed",
+                "title": "Horas antes del vuelo",
+                "tickvals": list(range(0, 200, 24)),
+                "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 9)],
+                "gridcolor": "rgba(128,128,128,0.1)",
+            },
+            "yaxis": {
+                "title": "Disponibilidad",
+                "range": [0, 7.5],
+                "tickvals": list(range(0, 8)),
+                "ticktext": ["0","1","2","3","4","5","6","7+"],
+                "gridcolor": "rgba(128,128,128,0.1)",
+            },
+            "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02},
+            "margin": {"l": 40, "r": 20, "t": 40, "b": 40},
+            "plot_bgcolor": "rgba(0,0,0,0)",
+            "paper_bgcolor": "rgba(0,0,0,0)",
+        }
+        st.plotly_chart({"data": traces, "layout": layout}, use_container_width=True)
+        st.caption("← Más días antes del vuelo  |  Momento del vuelo →  · Banda = P25-P75")
 
     # ── Tabla de cortes temporales ────────────────────────────────────────────
     st.subheader("Disponibilidad promedio por corte de tiempo")
