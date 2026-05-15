@@ -109,7 +109,12 @@ days_map  = {DOW_ES.get(d, d): d for d in all_days}
 
 with st.sidebar:
     sel_flights = st.multiselect("Vuelos", flights, default=flights[:2] if len(flights) >= 2 else flights)
-    sel_days_es = st.multiselect("Días de semana", days_opts, default=days_opts)
+    sel_days_es = st.multiselect(
+        "Día del vuelo",
+        days_opts,
+        default=days_opts,
+        help="Filtra las fechas de vuelo por día de semana. Afecta el heatmap."
+    )
     sel_days    = [days_map[d] for d in sel_days_es]
 
 df_f = df[df["Vuelo"].isin(sel_flights) & df["dow"].isin(sel_days)]
@@ -167,8 +172,13 @@ else:
         st.stop()
 
     with st.sidebar:
-        sel_days2_es = st.multiselect("Filtrar días para curva", days_opts,
-                                       default=sel_days_es, key="curve_days")
+        sel_days2_es = st.multiselect(
+            "Día del vuelo para curva y tabla",
+            days_opts,
+            default=sel_days_es,
+            key="curve_days",
+            help="Seleccioná uno o más días para ver cómo evoluciona la disponibilidad promedio antes de vuelos en esos días. Ej: solo 'Domingo' muestra el patrón típico de los vuelos del domingo."
+        )
         sel_days2 = [days_map[d] for d in sel_days2_es]
 
     df_h = df_h[df_h["dow"].isin(sel_days2)] if sel_days2 else df_h
