@@ -43,7 +43,13 @@ def load_sheet(sheet_name):
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds  = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+    # Try Streamlit Secrets first (cloud), fallback to local credentials.json
+    try:
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=scopes)
+    except Exception:
+        creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+
     client = gspread.authorize(creds)
     gsheet = client.open_by_key(GSHEET_ID)
     try:
