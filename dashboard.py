@@ -151,7 +151,7 @@ if view == "📊 Heatmap por fecha":
             elif val >= 1: return "background-color:#F7C1C1;color:#5a0000;font-weight:bold"
             else:          return "background-color:#FCEBEB;color:#8a0000;font-weight:bold"
 
-        styled = row_df.style.applymap(color_cell).format("{:.0f}")
+        styled = row_df.style.map(color_cell).format("{:.0f}")
         st.dataframe(styled, use_container_width=True, hide_index=True)
         st.divider()
 
