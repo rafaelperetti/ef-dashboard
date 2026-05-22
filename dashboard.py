@@ -199,14 +199,19 @@ else:
             cls = "J"
         sub["bucket"] = (sub["hours_before"] / 6).round() * 6
         grouped = sub.groupby("bucket")[cls].agg(
-            mean="mean", q25=lambda x: x.quantile(0.25), q75=lambda x: x.quantile(0.75)
+            mean="mean",
+            q25=lambda x: x.quantile(0.25),
+            q75=lambda x: x.quantile(0.75),
+            n="count",
+            mn="min",
+            mx="max",
         ).reset_index().sort_values("bucket", ascending=False)
 
         color_line, color_band = COLORS[i % len(COLORS)]
         dep   = FLIGHT_TIMES.get(vuelo, "")
         label = f"{vuelo} {dep} ({cls})"
 
-        # Upper band
+        # Band
         traces.append({
             "x": grouped["bucket"].tolist() + grouped["bucket"].tolist()[::-1],
             "y": grouped["q75"].tolist() + grouped["q25"].tolist()[::-1],
@@ -218,7 +223,17 @@ else:
             "type": "scatter",
             "mode": "lines",
         })
-        # Mean line
+        # Mean line with rich tooltip
+        hover = [
+            f"<b>{h:.0f}h antes del vuelo</b><br>"
+            f"Promedio: {m:.1f}<br>"
+            f"Mínimo: {mn:.0f} · Máximo: {mx:.0f}<br>"
+            f"Observaciones: {int(n)}"
+            for h, m, mn, mx, n in zip(
+                grouped["bucket"], grouped["mean"],
+                grouped["mn"], grouped["mx"], grouped["n"]
+            )
+        ]
         traces.append({
             "x": grouped["bucket"].tolist(),
             "y": grouped["mean"].tolist(),
@@ -227,7 +242,8 @@ else:
             "name": label,
             "line": {"color": color_line, "width": 2.5},
             "marker": {"size": 5, "color": color_line},
-            "hovertemplate": "%{x:.0f}h antes<br>Promedio = %{y:.1f}<extra>" + vuelo + "</extra>",
+            "text": hover,
+            "hovertemplate": "%{text}<extra>" + vuelo + "</extra>",
         })
 
     if traces:
@@ -306,6 +322,70 @@ else:
                         .map(color_cut, subset=num_cols)
                         .format("{:.1f}", subset=num_cols, na_rep="—"))
         st.dataframe(styled_tbl, use_container_width=True)
+
+    # ── Scatter plot ──────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Dispersión de observaciones individuales")
+    st.caption("Cada punto es una medición real. Filtrá un vuelo y un día para ver todos los datos crudos.")
+
+    scatter_traces = []
+    for i, vuelo in enumerate(sel_flights):
+        sub = df_h[df_h["Vuelo"] == vuelo].copy()
+        if sub.empty:
+            continue
+        cls = key_class(vuelo, route)
+        if cls not in sub.columns:
+            cls = "J"
+        color_line, _ = COLORS[i % len(COLORS)]
+        dep = FLIGHT_TIMES.get(vuelo, "")
+
+        hover_sc = [
+            f"<b>{vuelo} {dep}</b><br>"
+            f"{h:.0f}h antes del vuelo<br>"
+            f"{cls} = {v:.0f}<br>"
+            f"Fecha vuelo: {fv}"
+            for h, v, fv in zip(sub["hours_before"], sub[cls], sub["Fecha vuelo"])
+        ]
+        scatter_traces.append({
+            "x": sub["hours_before"].tolist(),
+            "y": sub[cls].tolist(),
+            "type": "scatter",
+            "mode": "markers",
+            "name": f"{vuelo} ({cls})",
+            "marker": {
+                "color": color_line,
+                "size": 7,
+                "opacity": 0.6,
+                "line": {"color": "white", "width": 0.5}
+            },
+            "text": hover_sc,
+            "hovertemplate": "%{text}<extra></extra>",
+        })
+
+    if scatter_traces:
+        sc_layout = {
+            "height": 380,
+            "xaxis": {
+                "autorange": "reversed",
+                "title": "Horas antes del vuelo",
+                "tickvals": list(range(0, 200, 24)),
+                "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 9)],
+                "gridcolor": "rgba(128,128,128,0.1)",
+            },
+            "yaxis": {
+                "title": "Disponibilidad",
+                "range": [-0.3, 7.5],
+                "tickvals": list(range(0, 8)),
+                "ticktext": ["0","1","2","3","4","5","6","7+"],
+                "gridcolor": "rgba(128,128,128,0.1)",
+            },
+            "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02},
+            "margin": {"l": 40, "r": 20, "t": 40, "b": 40},
+            "plot_bgcolor": "rgba(0,0,0,0)",
+            "paper_bgcolor": "rgba(0,0,0,0)",
+        }
+        st.plotly_chart({"data": scatter_traces, "layout": sc_layout}, use_container_width=True)
+        st.caption("Tip: seleccioná un solo vuelo y un solo día para ver el patrón más claro.")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()
