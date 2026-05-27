@@ -228,33 +228,26 @@ elif view == "📈 Curva vs tiempo":
         xs_raw = sub["hours_before"].values
         ys_raw = sub[cls].values.astype(float)
 
-        # Grid suavizado
-        x_grid = np.linspace(xs_raw.max(), xs_raw.min(), 80)
-        # Smooth en grid
-        all_x = np.concatenate([x_grid, xs_raw])
-        all_y_placeholder = np.zeros(len(x_grid))
-        smoothed_all = loess_smooth(
-            np.concatenate([x_grid, xs_raw]),
-            np.concatenate([all_y_placeholder, ys_raw]),
-            bandwidth=0.4
-        )
-        # Solo usamos el smooth calculado con datos reales
-        smoothed_grid = loess_smooth(
-            np.concatenate([x_grid]),
-            loess_smooth(xs_raw, ys_raw, bandwidth=0.4)[
-                np.searchsorted(-xs_raw, -x_grid, side='left').clip(0, len(xs_raw)-1)
-            ],
-            bandwidth=0.3
-        )
-        # Más simple: smooth directo en puntos reales, luego interpolar
-        smoothed_pts = loess_smooth(xs_raw, ys_raw, bandwidth=0.4)
+        from numpy import interp
+
+        # Bandwidth adaptivo: más pequeño = más fiel a los datos reales
+        # Con pocos datos usamos bandwidth menor para no distorsionar los extremos
+        n_pts = len(xs_raw)
+        bw = max(0.15, min(0.30, 10 / n_pts))
+
+        smoothed_pts = loess_smooth(xs_raw, ys_raw, bandwidth=bw)
         upper_pts, lower_pts = compute_ci(xs_raw, ys_raw, smoothed_pts)
 
-        # Interpolar al grid
-        from numpy import interp
-        sm_grid   = interp(x_grid, xs_raw[::-1], smoothed_pts[::-1])
-        up_grid   = interp(x_grid, xs_raw[::-1], upper_pts[::-1])
-        lo_grid   = interp(x_grid, xs_raw[::-1], lower_pts[::-1])
+        # Grid para visualización
+        x_grid = np.linspace(xs_raw.max(), xs_raw.min(), 80)
+        sm_grid = interp(x_grid, xs_raw[::-1], smoothed_pts[::-1])
+        up_grid = interp(x_grid, xs_raw[::-1], upper_pts[::-1])
+        lo_grid = interp(x_grid, xs_raw[::-1], lower_pts[::-1])
+
+        # Anclar extremos al valor real (primer y último punto observado)
+        sm_grid = np.clip(sm_grid, 0, 7)
+        sm_grid[0]  = float(ys_raw[0])   # anclaje inicio
+        sm_grid[-1] = float(ys_raw[-1])  # anclaje cierre
 
         color_line, color_band = COLORS[i % len(COLORS)]
         dep = FLIGHT_TIMES.get(vuelo, "")
