@@ -230,10 +230,9 @@ elif view == "📈 Curva vs tiempo":
 
         from numpy import interp
 
-        # Bandwidth adaptivo: más pequeño = más fiel a los datos reales
-        # Con pocos datos usamos bandwidth menor para no distorsionar los extremos
+        # Bandwidth bajo: priorizar fidelidad a los datos sobre suavidad
         n_pts = len(xs_raw)
-        bw = max(0.15, min(0.30, 10 / n_pts))
+        bw = max(0.10, min(0.20, 8 / n_pts))
 
         smoothed_pts = loess_smooth(xs_raw, ys_raw, bandwidth=bw)
         upper_pts, lower_pts = compute_ci(xs_raw, ys_raw, smoothed_pts)
@@ -503,42 +502,62 @@ else:
         if len(hist) >= 5 and cls in hist.columns:
             hist = hist.sort_values("hours_before", ascending=False)
 
-            # Curva histórica promedio (LOESS en horas_before)
+            # Proyección basada en deltas individuales por fecha histórica
+            # Para cada fecha histórica calculamos cuánto cambió J desde hours_now al cierre
+            # y aplicamos esa misma forma al valor actual
+            from numpy import interp
+
             h_xs = hist["hours_before"].values
             h_ys = hist[cls].values.astype(float)
-            if len(h_xs) >= 5:
-                h_sm = loess_smooth(h_xs, h_ys, bandwidth=0.4)
 
-                # Valor histórico en el punto actual (interpolado)
-                from numpy import interp
+            n_proj = 30
+            proj_hours = np.linspace(hours_now, 0, n_proj)
+
+            fechas_hist_proj = hist["Fecha vuelo"].unique()
+            delta_curves = []
+
+            for fh in fechas_hist_proj:
+                sh = hist[hist["Fecha vuelo"] == fh].sort_values("hours_before")
+                if len(sh) < 3:
+                    continue
+                hx = sh["hours_before"].values
+                hy = sh[cls].values.astype(float)
+                if hx.max() < hours_now * 0.5:
+                    continue
+                val_at_now = float(np.clip(interp(hours_now, hx[::-1], hy[::-1]), 0, 7))
+                if val_at_now < 0.5:
+                    continue
+                vals_at_proj = np.clip(interp(proj_hours, hx[::-1], hy[::-1]), 0, 7)
+                deltas = vals_at_proj - val_at_now
+                delta_curves.append(deltas)
+
+            h_sm = loess_smooth(h_xs, h_ys, bandwidth=0.45) if len(h_xs) >= 5 else h_ys
+            h_upper, h_lower = compute_ci(h_xs, h_ys, h_sm, confidence=0.80)
+
+            if len(delta_curves) >= 2:
+                delta_arr  = np.array(delta_curves)
+                mean_delta = np.mean(delta_arr, axis=0)
+                std_delta  = np.std(delta_arr, axis=0)
+                proj_smooth = np.clip(current_val + mean_delta, 0, 7)
+                proj_upper  = np.clip(current_val + mean_delta + 1.28 * std_delta, 0, 7)
+                proj_lower  = np.clip(current_val + mean_delta - 1.28 * std_delta, 0, 7)
+                valid_proj = True
+            elif len(h_xs) >= 5:
                 h_xs_asc = h_xs[::-1]
                 h_sm_asc = h_sm[::-1]
-                hist_val_now = float(np.clip(
-                    interp(hours_now, h_xs_asc, h_sm_asc), 0, 7))
-                offset = current_val - hist_val_now  # ajuste relativo
-
-                # Proyectar desde ahora hasta el vuelo
-                # Usamos la FORMA de la curva histórica (pendiente) anclada al valor actual
-                n_proj = 30
-                proj_hours = np.linspace(hours_now, 0, n_proj)
-
-                # Valores históricos en cada punto de la proyección
-                hist_at_proj = interp(proj_hours, h_xs_asc, h_sm_asc)
-                hist_at_now  = float(np.clip(interp(hours_now, h_xs_asc, h_sm_asc), 0.01, 7))
-
-                # Proyección = valor actual * (forma histórica / valor histórico en t=now)
-                # Esto ancla el nivel al valor actual y aplica la forma/caída del histórico
+                hist_at_now = float(np.clip(interp(hours_now, h_xs_asc, h_sm_asc), 0.01, 7))
                 scale = current_val / hist_at_now if hist_at_now > 0 else 1.0
+                hist_at_proj = interp(proj_hours, h_xs_asc, h_sm_asc)
                 proj_smooth = np.clip(hist_at_proj * scale, 0, 7)
-
-                # CI: escalar también la banda por el mismo factor
-                h_upper, h_lower = compute_ci(h_xs, h_ys, h_sm, confidence=0.80)
                 h_up_asc = np.array(h_upper)[::-1]
                 h_lo_asc = np.array(h_lower)[::-1]
-                hist_up_at_proj = interp(proj_hours, h_xs_asc, h_up_asc)
-                hist_lo_at_proj = interp(proj_hours, h_xs_asc, h_lo_asc)
-                proj_upper = np.clip(hist_up_at_proj * scale, 0, 7)
-                proj_lower = np.clip(hist_lo_at_proj * scale, 0, 7)
+                proj_upper = np.clip(interp(proj_hours, h_xs_asc, h_up_asc) * scale, 0, 7)
+                proj_lower = np.clip(interp(proj_hours, h_xs_asc, h_lo_asc) * scale, 0, 7)
+                valid_proj = True
+            else:
+                valid_proj = False
+
+            if valid_proj:
 
                 # Timestamps proyectados
                 proj_ts = [
