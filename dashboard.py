@@ -502,8 +502,8 @@ else:
         if len(hist) >= 5 and cls in hist.columns:
             hist = hist.sort_values("hours_before", ascending=False)
 
-            # Proyección: buckets históricos del mismo día de semana
-            # Caída esperada desde hours_now anclada al valor actual
+            # Proyección: forma normalizada de la curva histórica
+            # Escala la forma histórica para que parta de current_val
             from numpy import interp
 
             flight_dow = flight_date_parsed.strftime("%a") if pd.notna(flight_date_parsed) else None
@@ -513,31 +513,39 @@ else:
             ) else hist.copy()
 
             hist_dow["bucket"] = (hist_dow["hours_before"] / 12).round() * 12
-            buckets = hist_dow.groupby("bucket")[cls].agg(["mean","std"]).reset_index()
-            buckets = buckets.sort_values("bucket")
+            buckets = hist_dow.groupby("bucket")[cls].agg(["mean","std","count"]).reset_index()
+            buckets = buckets.sort_values("bucket", ascending=True)  # 0 a max
             buckets["std"] = buckets["std"].fillna(0)
 
             n_proj = 40
             proj_hours = np.linspace(hours_now, 0, n_proj)
             valid_proj = False
+            n_hist_dates = len(hist_dow["Fecha vuelo"].unique())
 
             if len(buckets) >= 3:
                 b_xs   = buckets["bucket"].values.astype(float)
                 b_mean = buckets["mean"].values.astype(float)
                 b_std  = buckets["std"].values.astype(float)
 
-                hist_mean_now = float(np.clip(interp(hours_now, b_xs, b_mean), 0.01, 7))
-                mean_at_proj  = interp(proj_hours, b_xs, b_mean)
-                std_at_proj   = interp(proj_hours, b_xs, b_std)
+                # Valor histórico en hours_now y al cierre (h=0)
+                hist_at_now   = float(np.clip(interp(hours_now, b_xs, b_mean), 0.001, 7))
+                hist_at_close = float(np.clip(interp(0, b_xs, b_mean), 0, 7))
 
-                delta_mean = mean_at_proj - hist_mean_now
-                proj_smooth = np.clip(current_val + delta_mean, 0, 7)
-                proj_upper  = np.clip(current_val + delta_mean + 1.28 * std_at_proj, 0, 7)
-                proj_lower  = np.clip(current_val + delta_mean - 1.28 * std_at_proj, 0, 7)
+                # Forma histórica en los puntos proyectados
+                hist_at_proj = interp(proj_hours, b_xs, b_mean)
+                std_at_proj  = np.clip(interp(proj_hours, b_xs, b_std), 0, 3)
 
-                proj_smooth[0] = current_val
-                proj_upper[0]  = min(7.0, current_val + 1.28 * float(interp(hours_now, b_xs, b_std)))
-                proj_lower[0]  = max(0.0, current_val - 1.28 * float(interp(hours_now, b_xs, b_std)))
+                # Normalizar: escalar la forma histórica para que en hours_now = current_val
+                # y al cierre = current_val * (hist_close / hist_now)
+                scale = current_val / hist_at_now if hist_at_now > 0 else 1.0
+                proj_smooth = np.clip(hist_at_proj * scale, 0, 7)
+                proj_upper  = np.clip((hist_at_proj + 1.28 * std_at_proj) * scale, 0, 7)
+                proj_lower  = np.clip((hist_at_proj - 1.28 * std_at_proj) * scale, 0, 7)
+
+                # Anclar primer punto exactamente al valor actual
+                proj_smooth[0] = float(current_val)
+                proj_upper[0]  = float(np.clip(current_val * (1 + 1.28 * float(interp(hours_now, b_xs, b_std)) / hist_at_now), 0, 7))
+                proj_lower[0]  = float(np.clip(current_val * (1 - 1.28 * float(interp(hours_now, b_xs, b_std)) / hist_at_now), 0, 7))
 
                 proj_ts = [
                     (flight_dt - pd.Timedelta(hours=float(h))).strftime("%d/%m %H:%M")
@@ -553,7 +561,7 @@ else:
                     "type": "scatter", "mode": "lines",
                 })
                 hover_proj = [
-                    f"<b>Proyección</b><br>{t}<br>{cls} estimado: {v:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]"
+                    f"<b>Proyección</b><br>{t}<br>{cls} estimado: {v:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]<br>Basado en {n_hist_dates} fecha(s) históricas"
                     for t, v, lo, up in zip(proj_ts, proj_smooth, proj_lower, proj_upper)
                 ]
                 ev_traces.append({
@@ -565,6 +573,9 @@ else:
                     "hovertemplate": "%{text}<extra>Proyección</extra>",
                 })
                 valid_proj = True
+
+                if n_hist_dates < 4:
+                    st.warning(f"⚠️ Proyección basada en solo {n_hist_dates} fecha(s) histórica(s) del mismo día — alta incertidumbre.")
                 # Probabilidad empírica ajustada
                 # Para cada fecha histórica, tomar el valor en hours_now e interpolar al cierre
                 fechas_hist = hist["Fecha vuelo"].unique()
