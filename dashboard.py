@@ -586,25 +586,22 @@ else:
 
                 if n_hist_dates < 4:
                     st.warning(f"⚠️ Proyección basada en solo {n_hist_dates} fecha(s) histórica(s) del mismo día — alta incertidumbre.")
-                # Probabilidad empírica ajustada
-                # Para cada fecha histórica, tomar el valor en hours_now e interpolar al cierre
-                fechas_hist = hist["Fecha vuelo"].unique()
-                cierres = []
-                for fh in fechas_hist:
-                    sh = hist[hist["Fecha vuelo"] == fh].sort_values("hours_before")
-                    if len(sh) < 2:
-                        continue
-                    hx = sh["hours_before"].values
-                    hy = sh[cls].values.astype(float)
-                    val_now_h = float(np.clip(interp(hours_now, hx[::-1], hy[::-1]), 0, 7)) if hours_now <= hx.max() else hy[0]
-                    val_close = float(hy[hy == hy.min()].mean()) if len(hy) > 0 else 0
-                    delta = val_close - val_now_h  # cuánto cayó ese vuelo
-                    cierre_ajustado = current_val + delta
-                    cierres.append(np.clip(cierre_ajustado, 0, 7))
+                # Probabilidad: usar directamente el valor proyectado al cierre (h=0)
+                # y la banda de confianza — consistente con la curva visual
+                proj_at_close = float(proj_smooth[-1])  # valor proyectado en h=0
+                ci_lower_at_close = float(proj_lower[-1])  # límite inferior IC 80%
+                ci_upper_at_close = float(proj_upper[-1])  # límite superior IC 80%
 
-                if cierres:
-                    prob = sum(1 for c in cierres if c >= cupos_min) / len(cierres)
-                    n_hist = len(cierres)
+                # Probabilidad empírica: asumiendo distribución normal entre lower y upper
+                # P(J >= cupos_min) basado en el rango de la proyección
+                if ci_upper_at_close > ci_lower_at_close:
+                    # Fraction of the CI that lies above cupos_min
+                    range_ci = ci_upper_at_close - ci_lower_at_close
+                    above = max(0, ci_upper_at_close - cupos_min)
+                    prob = min(1.0, above / range_ci) if range_ci > 0 else (1.0 if proj_at_close >= cupos_min else 0.0)
+                else:
+                    prob = 1.0 if proj_at_close >= cupos_min else 0.0
+                n_hist = n_hist_dates
 
     ev_layout = {
         "height": 400,
