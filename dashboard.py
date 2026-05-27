@@ -351,6 +351,41 @@ elif view == "📈 Curva vs tiempo":
         st.dataframe(tbl.style.map(color_cut, subset=num_cols).format("{:.1f}", subset=num_cols, na_rep="—"),
                      use_container_width=True)
 
+    # ── Tabla detalle por vuelo y fecha ──────────────────────────────────────
+    st.subheader("Detalle por vuelo y fecha")
+    st.caption("Cada fila es un vuelo en una fecha específica. Mismo color que la tabla de promedios.")
+
+    detail_rows = []
+    for vuelo in sel_flights:
+        sub_v = df_h[df_h["Vuelo"] == vuelo].copy()
+        if sub_v.empty: continue
+        cls = key_class(vuelo, route)
+        if cls not in sub_v.columns: cls = "J"
+        dep = FLIGHT_TIMES.get(vuelo, "")
+
+        for fecha in sorted(sub_v["Fecha vuelo"].unique()):
+            sub_f = sub_v[sub_v["Fecha vuelo"] == fecha]
+            dow = sub_f["dow"].iloc[0] if not sub_f.empty else ""
+            dow_es = DOW_ES.get(dow, dow)
+            fecha_short = fecha.split(" ")[0] if " " in fecha else fecha
+            row = {
+                "Vuelo": f"{vuelo} {dep}",
+                "Fecha": f"{fecha_short} ({dow_es})",
+                "Clase": cls,
+            }
+            for cut_label, (lo, hi) in CUTS.items():
+                window = sub_f[(sub_f["hours_before"] >= lo) & (sub_f["hours_before"] <= hi)]
+                row[cut_label] = round(window[cls].mean(), 1) if len(window) > 0 else None
+            detail_rows.append(row)
+
+    if detail_rows:
+        dtbl = pd.DataFrame(detail_rows).set_index(["Vuelo", "Fecha"])
+        num_cols_d = [c for c in dtbl.columns if c != "Clase"]
+        styled_dtbl = (dtbl.style
+                          .map(color_cut, subset=num_cols_d)
+                          .format("{:.1f}", subset=num_cols_d, na_rep="—"))
+        st.dataframe(styled_dtbl, use_container_width=True)
+
     # Scatter
     st.divider()
     st.subheader("Dispersión de observaciones individuales")
@@ -407,7 +442,15 @@ else:
         if not fechas_disp:
             st.warning("Sin fechas disponibles para este vuelo.")
             st.stop()
-        fecha_sel = st.selectbox("Fecha del vuelo", fechas_disp)
+        # Default: fecha más cercana a hoy+2 días
+        target_date = (datetime.now() + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+        default_idx = 0
+        for i, f in enumerate(fechas_disp):
+            f_date = f.split(" ")[0] if " " in f else f
+            if f_date >= target_date:
+                default_idx = i
+                break
+        fecha_sel = st.selectbox("Fecha del vuelo", fechas_disp, index=default_idx)
 
     sub = df[(df["Vuelo"] == vuelo_sel) & (df["Fecha vuelo"] == fecha_sel)].copy()
     sub = sub.sort_values("Timestamp consulta")
@@ -482,19 +525,27 @@ else:
                 offset = current_val - hist_val_now  # ajuste relativo
 
                 # Proyectar desde ahora hasta el vuelo
+                # Usamos la FORMA de la curva histórica (pendiente) anclada al valor actual
                 n_proj = 30
                 proj_hours = np.linspace(hours_now, 0, n_proj)
-                proj_smooth = np.clip(
-                    interp(proj_hours, h_xs_asc, h_sm_asc) + offset, 0, 7)
 
-                # CI: varianza histórica de residuos
+                # Valores históricos en cada punto de la proyección
+                hist_at_proj = interp(proj_hours, h_xs_asc, h_sm_asc)
+                hist_at_now  = float(np.clip(interp(hours_now, h_xs_asc, h_sm_asc), 0.01, 7))
+
+                # Proyección = valor actual * (forma histórica / valor histórico en t=now)
+                # Esto ancla el nivel al valor actual y aplica la forma/caída del histórico
+                scale = current_val / hist_at_now if hist_at_now > 0 else 1.0
+                proj_smooth = np.clip(hist_at_proj * scale, 0, 7)
+
+                # CI: escalar también la banda por el mismo factor
                 h_upper, h_lower = compute_ci(h_xs, h_ys, h_sm, confidence=0.80)
                 h_up_asc = np.array(h_upper)[::-1]
                 h_lo_asc = np.array(h_lower)[::-1]
-                proj_upper = np.clip(
-                    interp(proj_hours, h_xs_asc, h_up_asc) + offset, 0, 7)
-                proj_lower = np.clip(
-                    interp(proj_hours, h_xs_asc, h_lo_asc) + offset, 0, 7)
+                hist_up_at_proj = interp(proj_hours, h_xs_asc, h_up_asc)
+                hist_lo_at_proj = interp(proj_hours, h_xs_asc, h_lo_asc)
+                proj_upper = np.clip(hist_up_at_proj * scale, 0, 7)
+                proj_lower = np.clip(hist_lo_at_proj * scale, 0, 7)
 
                 # Timestamps proyectados
                 proj_ts = [
@@ -543,6 +594,7 @@ else:
 
                 if cierres:
                     prob = sum(1 for c in cierres if c >= cupos_min) / len(cierres)
+                    n_hist = len(cierres)
 
     ev_layout = {
         "height": 400,
@@ -576,7 +628,7 @@ else:
         st.metric(
             label=f"{color} Probabilidad de {cupos_min}+ cupos {cls} al cierre",
             value=f"{pct}%",
-            help=f"Basado en {len(cierres)} vuelos históricos similares, ajustando por la disponibilidad actual de {current_val:.0f} cupos a {hours_now:.0f}h del vuelo."
+            help=f"Basado en {n_hist} vuelos históricos similares. Proyección anclada al valor actual ({current_val:.0f} cupos) aplicando la forma histórica de caída."
         )
     elif not is_future:
         st.caption("Vuelo ya ocurrido — mostrando el historial real completo.")
