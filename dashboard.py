@@ -502,60 +502,42 @@ else:
         if len(hist) >= 5 and cls in hist.columns:
             hist = hist.sort_values("hours_before", ascending=False)
 
-            # Proyección basada en deltas individuales por fecha histórica
-            # Para cada fecha histórica calculamos cuánto cambió J desde hours_now al cierre
-            # y aplicamos esa misma forma al valor actual
+            # Proyección: usar la curva LOESS del mismo vuelo/día de semana como forma
+            # escalada desde el valor actual — igual que "Curva vs tiempo" filtrada por dow
             from numpy import interp
 
-            h_xs = hist["hours_before"].values
-            h_ys = hist[cls].values.astype(float)
+            # Filtrar histórico por mismo día de semana que el vuelo seleccionado
+            flight_dow = flight_date_parsed.strftime("%a") if pd.notna(flight_date_parsed) else None
+            hist_dow = hist[hist["dow"] == flight_dow] if flight_dow and "dow" in hist.columns and len(hist[hist["dow"] == flight_dow]) >= 3 else hist
+
+            h_xs = hist_dow["hours_before"].values
+            h_ys = hist_dow[cls].values.astype(float)
 
             n_proj = 30
             proj_hours = np.linspace(hours_now, 0, n_proj)
+            valid_proj = False
 
-            fechas_hist_proj = hist["Fecha vuelo"].unique()
-            delta_curves = []
+            if len(h_xs) >= 3:
+                bw = max(0.10, min(0.20, 8 / len(h_xs)))
+                h_sm = loess_smooth(h_xs, h_ys, bandwidth=bw)
+                h_upper, h_lower = compute_ci(h_xs, h_ys, h_sm, confidence=0.80)
 
-            for fh in fechas_hist_proj:
-                sh = hist[hist["Fecha vuelo"] == fh].sort_values("hours_before")
-                if len(sh) < 3:
-                    continue
-                hx = sh["hours_before"].values
-                hy = sh[cls].values.astype(float)
-                if hx.max() < hours_now * 0.5:
-                    continue
-                val_at_now = float(np.clip(interp(hours_now, hx[::-1], hy[::-1]), 0, 7))
-                if val_at_now < 0.5:
-                    continue
-                vals_at_proj = np.clip(interp(proj_hours, hx[::-1], hy[::-1]), 0, 7)
-                deltas = vals_at_proj - val_at_now
-                delta_curves.append(deltas)
-
-            h_sm = loess_smooth(h_xs, h_ys, bandwidth=0.45) if len(h_xs) >= 5 else h_ys
-            h_upper, h_lower = compute_ci(h_xs, h_ys, h_sm, confidence=0.80)
-
-            if len(delta_curves) >= 2:
-                delta_arr  = np.array(delta_curves)
-                mean_delta = np.mean(delta_arr, axis=0)
-                std_delta  = np.std(delta_arr, axis=0)
-                proj_smooth = np.clip(current_val + mean_delta, 0, 7)
-                proj_upper  = np.clip(current_val + mean_delta + 1.28 * std_delta, 0, 7)
-                proj_lower  = np.clip(current_val + mean_delta - 1.28 * std_delta, 0, 7)
-                valid_proj = True
-            elif len(h_xs) >= 5:
                 h_xs_asc = h_xs[::-1]
                 h_sm_asc = h_sm[::-1]
-                hist_at_now = float(np.clip(interp(hours_now, h_xs_asc, h_sm_asc), 0.01, 7))
-                scale = current_val / hist_at_now if hist_at_now > 0 else 1.0
-                hist_at_proj = interp(proj_hours, h_xs_asc, h_sm_asc)
-                proj_smooth = np.clip(hist_at_proj * scale, 0, 7)
                 h_up_asc = np.array(h_upper)[::-1]
                 h_lo_asc = np.array(h_lower)[::-1]
-                proj_upper = np.clip(interp(proj_hours, h_xs_asc, h_up_asc) * scale, 0, 7)
-                proj_lower = np.clip(interp(proj_hours, h_xs_asc, h_lo_asc) * scale, 0, 7)
+
+                # Valor de la curva histórica en hours_now
+                hist_at_now = float(np.clip(interp(hours_now, h_xs_asc, h_sm_asc), 0.01, 7))
+
+                # Escalar: anclar la curva histórica al valor actual
+                scale = current_val / hist_at_now if hist_at_now > 0 else 1.0
+
+                hist_at_proj = interp(proj_hours, h_xs_asc, h_sm_asc)
+                proj_smooth = np.clip(hist_at_proj * scale, 0, 7)
+                proj_upper  = np.clip(interp(proj_hours, h_xs_asc, h_up_asc) * scale, 0, 7)
+                proj_lower  = np.clip(interp(proj_hours, h_xs_asc, h_lo_asc) * scale, 0, 7)
                 valid_proj = True
-            else:
-                valid_proj = False
 
             if valid_proj:
 
