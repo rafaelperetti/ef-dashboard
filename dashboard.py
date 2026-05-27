@@ -474,15 +474,29 @@ else:
 
     ev_traces = []
 
-    # Línea real
+    # Calcular hours_before para la línea observada
+    dep_h2, dep_m2 = map(int, dep.split(":")) if dep else (0, 0)
+    if pd.notna(flight_date_parsed):
+        flight_dt_obs = flight_date_parsed.replace(hour=dep_h2, minute=dep_m2)
+        sub["hours_before_obs"] = (flight_dt_obs - sub["Timestamp consulta"]).dt.total_seconds() / 3600
+    else:
+        sub["hours_before_obs"] = 0
+
+    # Línea real (eje X = horas antes del vuelo, invertido)
+    hover_obs = [
+        f"<b>{h:.0f}h antes del vuelo</b><br>{cls} = {v}<br>{ts}"
+        for h, v, ts in zip(sub["hours_before_obs"], sub[cls],
+                            sub["Timestamp consulta"].dt.strftime("%d/%m %H:%M"))
+    ]
     ev_traces.append({
-        "x": sub["Timestamp consulta"].dt.strftime("%d/%m %H:%M").tolist(),
+        "x": sub["hours_before_obs"].tolist(),
         "y": sub[cls].tolist(),
         "type": "scatter", "mode": "lines+markers",
         "name": "Observado",
         "line": {"color": "#185FA5", "width": 2.5},
         "marker": {"size": 7, "color": "#185FA5"},
-        "hovertemplate": "%{x}<br>" + cls + " = %{y}<extra>Observado</extra>",
+        "text": hover_obs,
+        "hovertemplate": "%{text}<extra>Observado</extra>",
     })
 
     prob = None
@@ -547,13 +561,9 @@ else:
                 proj_upper[0]  = float(np.clip(current_val * (1 + 1.28 * float(interp(hours_now, b_xs, b_std)) / hist_at_now), 0, 7))
                 proj_lower[0]  = float(np.clip(current_val * (1 - 1.28 * float(interp(hours_now, b_xs, b_std)) / hist_at_now), 0, 7))
 
-                proj_ts = [
-                    (flight_dt - pd.Timedelta(hours=float(h))).strftime("%d/%m %H:%M")
-                    for h in proj_hours
-                ]
-
+                # Usar horas antes del vuelo como eje X (igual que Curva vs tiempo)
                 ev_traces.append({
-                    "x": proj_ts + proj_ts[::-1],
+                    "x": proj_hours.tolist() + proj_hours.tolist()[::-1],
                     "y": proj_upper.tolist() + proj_lower.tolist()[::-1],
                     "fill": "toself", "fillcolor": "rgba(24,95,165,0.10)",
                     "line": {"color": "rgba(0,0,0,0)"},
@@ -561,11 +571,11 @@ else:
                     "type": "scatter", "mode": "lines",
                 })
                 hover_proj = [
-                    f"<b>Proyección</b><br>{t}<br>{cls} estimado: {v:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]<br>Basado en {n_hist_dates} fecha(s) históricas"
-                    for t, v, lo, up in zip(proj_ts, proj_smooth, proj_lower, proj_upper)
+                    f"<b>{h:.0f}h antes del vuelo</b><br>{cls} estimado: {v:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]<br>Basado en {n_hist_dates} fecha(s) históricas"
+                    for h, v, lo, up in zip(proj_hours, proj_smooth, proj_lower, proj_upper)
                 ]
                 ev_traces.append({
-                    "x": proj_ts, "y": proj_smooth.tolist(),
+                    "x": proj_hours.tolist(), "y": proj_smooth.tolist(),
                     "type": "scatter", "mode": "lines",
                     "name": "Proyección ajustada",
                     "line": {"color": "#185FA5", "width": 2, "dash": "dash"},
@@ -599,8 +609,10 @@ else:
     ev_layout = {
         "height": 400,
         "xaxis": {
-            "title": "Fecha y hora de consulta",
-            "tickangle": -45,
+            "autorange": "reversed",
+            "title": "Horas antes del vuelo",
+            "tickvals": list(range(0, 220, 24)),
+            "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 10)],
             "gridcolor": "rgba(128,128,128,0.1)",
         },
         "yaxis": {
@@ -611,7 +623,7 @@ else:
             "gridcolor": "rgba(128,128,128,0.1)",
         },
         "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02},
-        "margin": {"l": 40, "r": 20, "t": 40, "b": 80},
+        "margin": {"l": 40, "r": 20, "t": 40, "b": 40},
         "plot_bgcolor": "rgba(0,0,0,0)",
         "paper_bgcolor": "rgba(0,0,0,0)",
     }
