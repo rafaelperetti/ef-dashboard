@@ -283,6 +283,8 @@ elif view == "📈 Curva vs tiempo":
         label = f"{vuelo} {dep} ({cls})"
 
         # Scatter observaciones reales
+        xs_raw = sub_all["hours_before"].values
+        ys_raw = sub_all[cls].values.astype(float)
         traces.append({
             "x": xs_raw.tolist(), "y": ys_raw.tolist(),
             "type": "scatter", "mode": "markers",
