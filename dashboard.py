@@ -129,9 +129,15 @@ def compute_hours_before(df, flight_times):
 def build_interpolated_grid(df_h, cls, grid=None):
     """
     Para cada vuelo/fecha, interpola J en una grilla densa de 0-200h.
-    None fuera del rango observado = valor más cercano (antes) o 0 (después).
-    Luego promedia todas las curvas y calcula CI.
-    Esto elimina el zigzag por mezcla de puntos de distintos vuelos.
+
+    Reglas:
+    - h > hx.max(): extender con el primer valor observado (no había scraping aún)
+    - Entre observaciones: interpolar linealmente
+    - h < hx.min(): NaN — no sabemos qué pasó, se excluye del promedio
+      EXCEPCIÓN: si el último valor observado es J=0 (vuelo cerrado),
+      extender con 0 hacia el cierre (sabemos que ya cerró)
+
+    Promedio y CI calculados ignorando NaN (np.nanmean / np.nanstd).
     """
     if grid is None:
         grid = np.arange(0, 201, 1, dtype=float)
@@ -143,22 +149,30 @@ def build_interpolated_grid(df_h, cls, grid=None):
         hy = grp[cls].values.astype(float)
         if len(hx) < 2:
             continue
-        curve = np.zeros(len(grid))
+
+        last_observed_j = hy[-1]  # valor en la observación más cercana al vuelo
+        curve = np.full(len(grid), np.nan)
+
         for i, h in enumerate(grid):
             if h > hx.max():
-                curve[i] = hy[0]       # antes de la primera obs: extender
-            elif h < hx.min():
-                curve[i] = 0.0         # después de la última obs: None=0
+                curve[i] = hy[0]          # antes del primer scraping: extender
+            elif h >= hx.min():
+                curve[i] = float(np.interp(h, hx[::-1], hy[::-1]))  # interpolar
             else:
-                curve[i] = float(np.interp(h, hx[::-1], hy[::-1]))
+                # h < hx.min(): después del último scraping
+                if last_observed_j == 0:
+                    curve[i] = 0.0        # vuelo cerrado: sabemos que es 0
+                else:
+                    curve[i] = np.nan     # sin dato: excluir del promedio
+
         all_curves.append(curve)
 
     if not all_curves:
         return grid, np.zeros(len(grid)), np.zeros(len(grid)), np.zeros(len(grid))
 
-    arr  = np.array(all_curves)
-    mean = arr.mean(axis=0)
-    std  = arr.std(axis=0)
+    arr   = np.array(all_curves)  # shape: (n_flights, n_grid)
+    mean  = np.nanmean(arr, axis=0)
+    std   = np.nanstd(arr, axis=0)
     upper = np.clip(mean + 1.28 * std, 0, 7)
     lower = np.clip(mean - 1.28 * std, 0, 7)
     return grid, mean, upper, lower
