@@ -399,9 +399,10 @@ elif view == "📈 Curva vs tiempo":
                 "Fecha": f"{fecha_short} ({dow_es})",
                 "Clase": cls,
             }
-            for cut_label, (lo, hi) in CUTS.items():
-                window = sub_f[(sub_f["hours_before"] >= lo) & (sub_f["hours_before"] <= hi)]
-                row[cut_label] = round(window[cls].mean(), 1) if len(window) > 0 else None
+            for cut_label, h_target in CUTS.items():
+                # Use interpolated grid for this specific flight/date
+                _, gm_d, _, _ = build_interpolated_grid(sub_f, cls)
+                row[cut_label] = round(float(gm_d[h_target]), 1) if h_target <= 200 else None
             detail_rows.append(row)
 
     if detail_rows:
