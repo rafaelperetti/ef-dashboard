@@ -277,16 +277,15 @@ elif view == "📈 Curva vs tiempo":
 
         # Bucket a 6h y calcular por punto individual para LOESS
         # Interpolación continua por vuelo + None=0
-        # Filtramos solo este vuelo del df_h completo
         sub_all = df_h[df_h["Vuelo"] == vuelo].copy()
 
         grid_full, gm, gu, gl = build_interpolated_grid(sub_all, cls)
 
         # Recortar al rango observado
         max_h = sub_all["hours_before"].max()
-        mask_g = grid_full <= max_h
-        x_grid = grid_full[mask_g][::-1]  # descending (far to near)
-        sm_grid = gm[mask_g][::-1]
+        mask_g = (grid_full <= max_h) & ~np.isnan(gm)
+        x_grid  = grid_full[mask_g][::-1]  # descending
+        sm_grid = gm[mask_g][::-1]          # mean directo de la grilla (no LOESS)
         up_grid = gu[mask_g][::-1]
         lo_grid = gl[mask_g][::-1]
 
