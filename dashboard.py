@@ -126,6 +126,44 @@ def compute_hours_before(df, flight_times):
     return df[(df["hours_before"] >= 0) & (df["hours_before"] <= 220)]
 
 
+def build_interpolated_grid(df_h, cls, grid=None):
+    """
+    Para cada vuelo/fecha, interpola J en una grilla densa de 0-200h.
+    None fuera del rango observado = valor más cercano (antes) o 0 (después).
+    Luego promedia todas las curvas y calcula CI.
+    Esto elimina el zigzag por mezcla de puntos de distintos vuelos.
+    """
+    if grid is None:
+        grid = np.arange(0, 201, 1, dtype=float)
+
+    all_curves = []
+    for (fecha, vuelo), grp in df_h.groupby(["Fecha vuelo", "Vuelo"]):
+        grp = grp.sort_values("hours_before", ascending=False)
+        hx = grp["hours_before"].values.astype(float)
+        hy = grp[cls].values.astype(float)
+        if len(hx) < 2:
+            continue
+        curve = np.zeros(len(grid))
+        for i, h in enumerate(grid):
+            if h > hx.max():
+                curve[i] = hy[0]       # antes de la primera obs: extender
+            elif h < hx.min():
+                curve[i] = 0.0         # después de la última obs: None=0
+            else:
+                curve[i] = float(np.interp(h, hx[::-1], hy[::-1]))
+        all_curves.append(curve)
+
+    if not all_curves:
+        return grid, np.zeros(len(grid)), np.zeros(len(grid)), np.zeros(len(grid))
+
+    arr  = np.array(all_curves)
+    mean = arr.mean(axis=0)
+    std  = arr.std(axis=0)
+    upper = np.clip(mean + 1.28 * std, 0, 7)
+    lower = np.clip(mean - 1.28 * std, 0, 7)
+    return grid, mean, upper, lower
+
+
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="EF Availability", page_icon="✈️", layout="wide")
 st.title("✈️ Disponibilidad Business")
@@ -224,29 +262,21 @@ elif view == "📈 Curva vs tiempo":
             cls = "J"
 
         # Bucket a 6h y calcular por punto individual para LOESS
-        sub = sub.sort_values("hours_before", ascending=False)
-        xs_raw = sub["hours_before"].values
-        ys_raw = sub[cls].values.astype(float)
+        # Interpolación continua por vuelo + None=0
+        # Filtramos solo este vuelo del df_h completo
+        sub_all = df_h[df_h["Vuelo"] == vuelo].copy()
+
+        grid_full, gm, gu, gl = build_interpolated_grid(sub_all, cls)
+
+        # Recortar al rango observado
+        max_h = sub_all["hours_before"].max()
+        mask_g = grid_full <= max_h
+        x_grid = grid_full[mask_g][::-1]  # descending (far to near)
+        sm_grid = gm[mask_g][::-1]
+        up_grid = gu[mask_g][::-1]
+        lo_grid = gl[mask_g][::-1]
 
         from numpy import interp
-
-        # Bandwidth bajo: priorizar fidelidad a los datos sobre suavidad
-        n_pts = len(xs_raw)
-        bw = max(0.10, min(0.20, 8 / n_pts))
-
-        smoothed_pts = loess_smooth(xs_raw, ys_raw, bandwidth=bw)
-        upper_pts, lower_pts = compute_ci(xs_raw, ys_raw, smoothed_pts)
-
-        # Grid para visualización
-        x_grid = np.linspace(xs_raw.max(), xs_raw.min(), 80)
-        sm_grid = interp(x_grid, xs_raw[::-1], smoothed_pts[::-1])
-        up_grid = interp(x_grid, xs_raw[::-1], upper_pts[::-1])
-        lo_grid = interp(x_grid, xs_raw[::-1], lower_pts[::-1])
-
-        # Anclar extremos al valor real (primer y último punto observado)
-        sm_grid = np.clip(sm_grid, 0, 7)
-        sm_grid[0]  = float(ys_raw[0])   # anclaje inicio
-        sm_grid[-1] = float(ys_raw[-1])  # anclaje cierre
 
         color_line, color_band = COLORS[i % len(COLORS)]
         dep = FLIGHT_TIMES.get(vuelo, "")
@@ -312,10 +342,8 @@ elif view == "📈 Curva vs tiempo":
     # Tabla de cortes
     st.subheader("Disponibilidad promedio por corte de tiempo")
     CUTS = {
-        "7d": (7*24-12, 7*24+12), "6d": (6*24-12, 6*24+12),
-        "5d": (5*24-12, 5*24+12), "4d": (4*24-12, 4*24+12),
-        "3d": (3*24-12, 3*24+12), "2d": (2*24-12, 2*24+12),
-        "1d": (1*24-12, 1*24+12), "12h": (9, 15), "6h": (3, 9), "3h": (0, 5),
+        "7d": 7*24, "6d": 6*24, "5d": 5*24, "4d": 4*24,
+        "3d": 3*24, "2d": 2*24, "1d": 1*24, "12h": 12, "6h": 6, "3h": 3,
     }
     rows = []
     for vuelo in sel_flights:
@@ -324,10 +352,14 @@ elif view == "📈 Curva vs tiempo":
         cls = key_class(vuelo, route)
         if cls not in sub.columns: cls = "J"
         dep = FLIGHT_TIMES.get(vuelo, "")
+        # Build interpolated grid for this vuelo
+        _, gm_cut, _, _ = build_interpolated_grid(sub, cls)
         row = {"Vuelo": f"{vuelo} {dep}", "Clase": cls}
-        for cut_label, (lo, hi) in CUTS.items():
-            window = sub[(sub["hours_before"] >= lo) & (sub["hours_before"] <= hi)]
-            row[cut_label] = round(window[cls].mean(), 1) if len(window) > 0 else None
+        for cut_label, h_target in CUTS.items():
+            if h_target <= 200:
+                row[cut_label] = round(float(gm_cut[h_target]), 1)
+            else:
+                row[cut_label] = None
         rows.append(row)
 
     if rows:
