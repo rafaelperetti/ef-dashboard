@@ -42,6 +42,30 @@ def key_class(vuelo, route):
 DOW_ES = {"Mon":"Lunes","Tue":"Martes","Wed":"Miércoles",
            "Thu":"Jueves","Fri":"Viernes","Sat":"Sábado","Sun":"Domingo"}
 
+def get_aircraft_mode(df, vuelo):
+    """Modelo más frecuente para un vuelo (para promedios/curvas)."""
+    if "Avión" not in df.columns:
+        return ""
+    vals = df[df["Vuelo"] == vuelo]["Avión"].dropna()
+    vals = vals[vals != ""]
+    if vals.empty:
+        return ""
+    return str(vals.mode().iloc[0])
+
+def get_aircraft_last(df, vuelo, fecha=None):
+    """Último modelo observado para un vuelo (para fechas específicas)."""
+    if "Avión" not in df.columns:
+        return ""
+    sub = df[df["Vuelo"] == vuelo]
+    if fecha:
+        sub = sub[sub["Fecha vuelo"] == fecha]
+    sub = sub.sort_values("Timestamp consulta")
+    vals = sub["Avión"].dropna()
+    vals = vals[vals != ""]
+    if vals.empty:
+        return ""
+    return str(vals.iloc[-1])
+
 # ── LOESS smoothing ────────────────────────────────────────────────────────────
 def loess_smooth(xs, ys, bandwidth=0.4):
     xs, ys = np.array(xs), np.array(ys)
@@ -245,7 +269,9 @@ if view == "📊 Heatmap por fecha":
         if cls not in sub.columns:
             cls = "J"
         dep = FLIGHT_TIMES.get(vuelo, "")
-        st.markdown(f"**{vuelo}** {dep} — clase `{cls}`")
+        ac_mode = get_aircraft_mode(df_f[df_f["Vuelo"]==vuelo], vuelo)
+        ac_label = f" ({ac_mode})" if ac_mode else ""
+        st.markdown(f"**{vuelo}** {dep}{ac_label} — clase `{cls}`")
         dates = [d.split(" ")[0] if " " in d else d for d in sub["Fecha vuelo"].tolist()]
         vals  = sub[cls].tolist()
         row_df = pd.DataFrame([vals], columns=dates)
@@ -298,7 +324,9 @@ elif view == "📈 Curva vs tiempo":
 
         color_line, color_band = COLORS[i % len(COLORS)]
         dep = FLIGHT_TIMES.get(vuelo, "")
-        label = f"{vuelo} {dep} ({cls})"
+        ac_mode = get_aircraft_mode(sub_all, vuelo)
+        ac_str = f" ({ac_mode})" if ac_mode else ""
+        label = f"{vuelo} {dep}{ac_str} ({cls})"
 
         # Scatter observaciones reales
         xs_raw = sub_all["hours_before"].values
@@ -372,9 +400,11 @@ elif view == "📈 Curva vs tiempo":
         cls = key_class(vuelo, route)
         if cls not in sub.columns: cls = "J"
         dep = FLIGHT_TIMES.get(vuelo, "")
+        ac_mode = get_aircraft_mode(sub, vuelo)
+        ac_str = f" ({ac_mode})" if ac_mode else ""
         # Build interpolated grid for this vuelo
         _, gm_cut, _, _ = build_interpolated_grid(sub, cls)
-        row = {"Vuelo": f"{vuelo} {dep}", "Clase": cls}
+        row = {"Vuelo": f"{vuelo} {dep}{ac_str}", "Clase": cls}
         for cut_label, h_target in CUTS.items():
             if h_target <= 200:
                 row[cut_label] = round(float(gm_cut[h_target]), 1)
@@ -412,8 +442,10 @@ elif view == "📈 Curva vs tiempo":
             dow = sub_f["dow"].iloc[0] if not sub_f.empty else ""
             dow_es = DOW_ES.get(dow, dow)
             fecha_short = fecha.split(" ")[0] if " " in fecha else fecha
+            ac_last = get_aircraft_last(sub_v, vuelo, fecha)
+            ac_str2 = f" ({ac_last})" if ac_last else ""
             row = {
-                "Vuelo": f"{vuelo} {dep}",
+                "Vuelo": f"{vuelo} {dep}{ac_str2}",
                 "Fecha": f"{fecha_short} ({dow_es})",
                 "Clase": cls,
             }
@@ -443,8 +475,10 @@ elif view == "📈 Curva vs tiempo":
         if cls not in sub.columns: cls = "J"
         color_line, _ = COLORS[i % len(COLORS)]
         dep = FLIGHT_TIMES.get(vuelo, "")
+        ac_sc = get_aircraft_mode(sub, vuelo)
+        ac_sc_str = f" ({ac_sc})" if ac_sc else ""
         hover_sc = [
-            f"<b>{vuelo} {dep}</b><br>{h:.0f}h antes<br>{cls} = {v:.0f}<br>{fv}"
+            f"<b>{vuelo} {dep}{ac_sc_str}</b><br>{h:.0f}h antes<br>{cls} = {v:.0f}<br>{fv}"
             for h, v, fv in zip(sub["hours_before"], sub[cls], sub["Fecha vuelo"])
         ]
         sc_traces.append({
@@ -509,6 +543,8 @@ else:
         st.stop()
 
     dep = FLIGHT_TIMES.get(vuelo_sel, "")
+    ac_evol = get_aircraft_last(sub, vuelo_sel, fecha_sel)
+    ac_evol_str = f" ({ac_evol})" if ac_evol else ""
 
     # Determinar si el vuelo ya ocurrió
     flight_date_parsed = pd.to_datetime(
@@ -517,7 +553,7 @@ else:
     flight_dt = flight_date_parsed.replace(hour=dep_h, minute=dep_m) if pd.notna(flight_date_parsed) else None
     is_future = flight_dt is not None and flight_dt > datetime.now()
 
-    st.markdown(f"**{vuelo_sel}** {dep} · **{fecha_sel}** · clase `{cls}` · {len(sub)} mediciones")
+    st.markdown(f"**{vuelo_sel}** {dep}{ac_evol_str} · **{fecha_sel}** · clase `{cls}` · {len(sub)} mediciones")
 
     # ── Slider de cupos mínimos (solo para vuelos futuros) ──
     if is_future:
