@@ -11,7 +11,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 GSHEET_ID = "1gHQNU564qiWArnZYLjXfJm7wbi49JRtpuQgKEwTml-A"
-ROUTES = ["BOG-SCL", "SCL-BOG", "BOG-MAD", "MAD-BOG", "BOG-GRU", "GRU-BOG"]
+ROUTES = ["BOG-SCL", "SCL-BOG", "BOG-MAD", "MAD-BOG", "BOG-GRU", "GRU-BOG", "BOG-AEP", "AEP-BOG", "BOG-EZE", "EZE-BOG"]
 
 FLIGHT_TIMES = {
     "LA575": "06:35", "LA711": "23:10",
@@ -25,6 +25,11 @@ FLIGHT_TIMES = {
     "AV161": "17:00", "LA4903": "21:20", "AV85":  "21:45", "AV199": "08:00",
     "AV248": "01:20", "AV160": "02:20", "AV86":  "07:35",
     "LA4904": "08:15", "AV184": "17:15", "LA4908": "23:45",
+    # BOG-EZE / EZE-BOG
+    "AV8395": "07:15", "AV217":  "16:00", "AV87":   "21:30",
+    "AV218":  "01:35", "AV88":   "07:10", "AV8396": "16:50",
+    # BOG-AEP / AEP-BOG
+    "AV155":  "21:30", "AV156":  "07:10",
 }
 
 def key_class(vuelo, route):
