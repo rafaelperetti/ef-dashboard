@@ -11,7 +11,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 GSHEET_ID = "1gHQNU564qiWArnZYLjXfJm7wbi49JRtpuQgKEwTml-A"
-ROUTES = ["BOG-SCL", "SCL-BOG", "BOG-MAD", "MAD-BOG", "BOG-GRU", "GRU-BOG", "GRU-MAD", "MAD-GRU", "BOG-AEP", "AEP-BOG", "BOG-EZE", "EZE-BOG"]
+ROUTES = ["BOG-SCL", "SCL-BOG", "BOG-MAD", "MAD-BOG", "BOG-GRU", "GRU-BOG", "BOG-AEP", "AEP-BOG", "BOG-EZE", "EZE-BOG"]
 
 FLIGHT_TIMES = {
     "LA575": "06:35", "LA711": "23:10",
@@ -30,14 +30,6 @@ FLIGHT_TIMES = {
     "AV218":  "01:35", "AV88":   "07:10", "AV8396": "16:50",
     # BOG-AEP / AEP-BOG
     "AV155":  "21:30", "AV156":  "07:10",
-    # GRU-MAD
-    "UX58":   "13:50", "IB268":  "14:00",
-    "IB272":  "19:20", "LA8076": "21:15",
-    "LA8066": "23:00",
-    # MAD-GRU
-    "IB271":  "11:50", "LA8075": "14:45",
-    "LA8065": "23:45", "IB267":  "23:55",
-    "UX57":   "23:55",
 }
 
 def key_class(vuelo, route):
@@ -49,6 +41,21 @@ def key_class(vuelo, route):
 
 DOW_ES = {"Mon":"Lunes","Tue":"Martes","Wed":"Miércoles",
            "Thu":"Jueves","Fri":"Viernes","Sat":"Sábado","Sun":"Domingo"}
+
+# ── Vista "Mejores días para ascender" ──────────────────────────────────────────
+BEST_DAYS_MAX_HOURS = 24  # ventana "cerca de salida" para considerar la medición relevante
+BEST_DAYS_MIN_N = 10      # mínimo de fechas observadas para mostrar un vuelo
+DOW_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+def get_aircraft_list(df, vuelo):
+    """Todos los modelos de avión vistos para un vuelo, como string separado por coma."""
+    if "Avión" not in df.columns:
+        return ""
+    vals = df[df["Vuelo"] == vuelo]["Avión"].dropna().astype(str)
+    vals = vals[vals != ""]
+    # descarta códigos basura de 1-2 dígitos que a veces deja el parser
+    limpio = sorted({v for v in vals if not v.isdigit() or len(v) >= 3})
+    return ", ".join(limpio)
 
 def get_aircraft_mode(df, vuelo):
     """Modelo más frecuente para un vuelo (para promedios/curvas)."""
@@ -163,6 +170,55 @@ def compute_hours_before(df, flight_times):
     return df[(df["hours_before"] >= 0) & (df["hours_before"] <= 220)]
 
 
+@st.cache_data(ttl=300)
+def compute_best_days_table(routes):
+    """
+    Recorre todas las rutas y arma una tabla: ruta, vuelo, avión(es), clase,
+    n, %ge2 (últimas mediciones con 2+ cupos) y el promedio por día de semana,
+    usando siempre la última medición tomada hasta BEST_DAYS_MAX_HOURS antes
+    de la salida real del vuelo (no el promedio histórico de todas las corridas).
+    """
+    filas = []
+    for r in routes:
+        df_r = load_sheet(r)
+        if df_r.empty:
+            continue
+        df_h = compute_hours_before(df_r, FLIGHT_TIMES)
+        df_h = df_h[df_h["hours_before"] <= BEST_DAYS_MAX_HOURS]
+        if df_h.empty:
+            continue
+
+        idx = df_h.groupby(["Vuelo", "Fecha vuelo"])["hours_before"].idxmin()
+        cercanas = df_h.loc[idx].copy()
+        cercanas["clase"] = cercanas["Vuelo"].apply(lambda v: key_class(v, r))
+
+        def _valor(row):
+            c = row["clase"]
+            return row[c] if c in row and pd.notna(row[c]) else np.nan
+        cercanas["valor"] = cercanas.apply(_valor, axis=1)
+
+        for vuelo, grp in cercanas.groupby("Vuelo"):
+            n = len(grp)
+            if n < BEST_DAYS_MIN_N:
+                continue
+            clase = grp["clase"].iloc[0]
+            fila = {
+                "ruta": r, "Vuelo": vuelo,
+                "avion": get_aircraft_list(df_r, vuelo),
+                "clase": clase, "n": n,
+                "prom": round(float(grp["valor"].mean()), 1),
+                "ge2_pct": round(float((grp["valor"] >= 2).mean() * 100), 1),
+            }
+            por_dia = grp.groupby("dow")["valor"].mean()
+            for d in DOW_ORDER:
+                fila[d] = round(float(por_dia[d]), 1) if d in por_dia.index else None
+            filas.append(fila)
+
+    if not filas:
+        return pd.DataFrame()
+    return pd.DataFrame(filas).sort_values("ge2_pct", ascending=False)
+
+
 def build_interpolated_grid(df_h, cls, grid=None):
     """
     Para cada vuelo/fecha, interpola J en una grilla densa de 0-200h.
@@ -224,7 +280,7 @@ with st.sidebar:
     st.header("Filtros")
     route = st.selectbox("Ruta", ROUTES)
     st.divider()
-    view = st.radio("Vista", ["📊 Heatmap por fecha", "📈 Curva vs tiempo", "📅 Evolución de una fecha"])
+    view = st.radio("Vista", ["📊 Heatmap por fecha", "📈 Curva vs tiempo", "📅 Evolución de una fecha", "🗓️ Mejores días para ascender"])
 
 df = load_sheet(route)
 
@@ -514,7 +570,7 @@ elif view == "📈 Curva vs tiempo":
         st.plotly_chart({"data": sc_traces, "layout": sc_layout}, use_container_width=True)
 
 # ── Vista 3: Evolución de una fecha específica ─────────────────────────────────
-else:
+elif view == "📅 Evolución de una fecha":
     st.subheader(f"Evolución histórica de una fecha de vuelo — {route}")
     st.caption("Fecha pasada: línea real. Fecha futura: línea real hasta hoy + proyección ajustada al valor actual.")
 
@@ -743,6 +799,51 @@ else:
         tbl2 = sub[["Timestamp consulta", cls, "Fecha vuelo"]].copy()
         tbl2["Timestamp consulta"] = tbl2["Timestamp consulta"].dt.strftime("%d/%m/%Y %H:%M")
         st.dataframe(tbl2.reset_index(drop=True), use_container_width=True)
+
+# ── Vista 4: Mejores días para ascender (todas las rutas) ──────────────────────
+elif view == "🗓️ Mejores días para ascender":
+    st.subheader("Mejores días para ascender")
+    st.caption(
+        f"Solo se usan mediciones tomadas hasta {BEST_DAYS_MAX_HOURS}h antes de la salida real "
+        "del vuelo (no el promedio histórico de todas las corridas). Clase = C para Avianca, "
+        "W para LATAM A320 en rutas GRU, J para el resto. Considera todas las rutas, no solo "
+        "la seleccionada en el sidebar."
+    )
+
+    tabla_bd = compute_best_days_table(tuple(ROUTES))
+    if tabla_bd.empty:
+        st.info("No hay suficientes mediciones cercanas a la salida todavía.")
+    else:
+        rutas_bd = ["Todas"] + sorted(tabla_bd["ruta"].unique())
+        ruta_bd_sel = st.selectbox("Filtrar por ruta", rutas_bd, key="best_days_ruta")
+        vista_bd = tabla_bd if ruta_bd_sel == "Todas" else tabla_bd[tabla_bd["ruta"] == ruta_bd_sel]
+
+        cols_mostrar = ["ruta", "Vuelo", "avion", "clase", "n"] + DOW_ORDER
+        tabla_fmt = vista_bd[cols_mostrar].rename(columns=DOW_ES).rename(
+            columns={"ruta": "Ruta", "avion": "Avión", "clase": "Clase"})
+
+        dias_es_cols = [DOW_ES[d] for d in DOW_ORDER]
+
+        def color_bd(val):
+            if pd.isna(val): return "color:#ccc"
+            if val >= 6:   return "background-color:#4CAF50;color:white;font-weight:bold"
+            elif val >= 4: return "background-color:#C0DD97;color:#1a3a00;font-weight:bold"
+            elif val >= 2: return "background-color:#FAC775;color:#4a2800;font-weight:bold"
+            elif val >= 1: return "background-color:#F7C1C1;color:#5a0000;font-weight:bold"
+            else:          return "background-color:#FCEBEB;color:#8a0000;font-weight:bold"
+
+        styled_bd = (tabla_fmt.style
+                     .map(color_bd, subset=dias_es_cols)
+                     .format("{:.1f}", subset=dias_es_cols, na_rep="—"))
+        st.dataframe(styled_bd, use_container_width=True, hide_index=True)
+
+        if not vista_bd.empty:
+            mejor = vista_bd.iloc[0]
+            st.caption(
+                f"Mejor vuelo actual: **{mejor['Vuelo']}** ({mejor['ruta']}, {mejor['avion']}) — "
+                f"{mejor['ge2_pct']:.0f}% de las últimas mediciones antes de salir tuvieron 2+ cupos "
+                f"en clase {mejor['clase']}."
+            )
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.divider()
