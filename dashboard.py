@@ -11,7 +11,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 GSHEET_ID = "1gHQNU564qiWArnZYLjXfJm7wbi49JRtpuQgKEwTml-A"
-ROUTES = ["BOG-SCL", "SCL-BOG", "BOG-MAD", "MAD-BOG", "BOG-GRU", "GRU-BOG", "BOG-AEP", "AEP-BOG", "BOG-EZE", "EZE-BOG"]
+ROUTES = ["BOG-SCL", "SCL-BOG", "BOG-MAD", "MAD-BOG", "BOG-GRU", "GRU-BOG", "BOG-AEP", "AEP-BOG", "BOG-EZE", "EZE-BOG", "GRU-MAD", "MAD-GRU"]
 
 FLIGHT_TIMES = {
     "LA575": "06:35", "LA711": "23:10",
@@ -30,10 +30,20 @@ FLIGHT_TIMES = {
     "AV218":  "01:35", "AV88":   "07:10", "AV8396": "16:50",
     # BOG-AEP / AEP-BOG
     "AV155":  "21:30", "AV156":  "07:10",
+    # GRU-MAD
+    "IB268": "14:00", "IB272": "19:20", "IB6540": "23:00", "IB6808": "21:15",
+    "LA1526": "19:20", "LA1579": "14:00", "LA8066": "23:00", "LA8076": "21:15",
+    "UX58": "13:50",
+    # MAD-GRU
+    "IB267": "23:55", "IB271": "11:50", "IB6541": "23:45", "IB6809": "14:45",
+    "LA1525": "11:50", "LA1572": "23:55", "LA8065": "23:45", "LA8075": "14:45",
+    "UX57": "23:55",
 }
 
+LATAM_NARROWBODY_ROUTES = {"BOG-GRU", "GRU-BOG"}  # LATAM vuela A320 ahí, sin J real -> usar W
+
 def key_class(vuelo, route):
-    if "GRU" in route and vuelo.startswith("LA"):
+    if route in LATAM_NARROWBODY_ROUTES and vuelo.startswith("LA"):
         return "W"
     if vuelo.startswith("AV"):
         return "C"
