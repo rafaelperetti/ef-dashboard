@@ -29,22 +29,14 @@ FLIGHT_TIMES = {
     "AV161": "17:00", "LA4903": "21:20", "AV85":  "21:45", "AV199": "08:00",
     "AV248": "01:20", "AV160": "02:20", "AV86":  "07:35",
     "LA4904": "08:15", "AV184": "17:15", "LA4908": "23:45",
-    # BOG-EZE / EZE-BOG
     "AV8395": "07:15", "AV217":  "16:00", "AV87":   "21:30",
     "AV218":  "01:35", "AV88":   "07:10", "AV8396": "16:50",
-    # BOG-AEP / AEP-BOG
     "AV155":  "21:30", "AV156":  "07:10",
-    # GRU-MAD
     "UX58":   "13:50", "IB268":  "14:00",
-    "IB272":  "19:20", "LA8076": "21:15",
-    "LA8066": "23:00",
-    # MAD-GRU
+    "IB272":  "19:20", "LA8076": "21:15", "LA8066": "23:00",
     "IB271":  "11:50", "LA8075": "14:45",
-    "LA8065": "23:45", "IB267":  "23:55",
-    "UX57":   "23:55",
-    # BOG-MIA / MIA-BOG
+    "LA8065": "23:45", "IB267":  "23:55", "UX57":   "23:55",
     "EK213":  "12:05", "EK214":  "17:19",
-    # BOG-LIM / LIM-BOG
     "AV49":   "05:00", "AV51":   "07:30", "AV53":   "09:30",
     "AV75":   "11:30", "AV103":  "14:00", "AV55":   "17:00",
     "AV57":   "19:30", "AV59":   "22:45",
@@ -68,12 +60,22 @@ def key_class(vuelo, route):
         return "W"
     return "J"
 
-
 DOW_ES = {"Mon":"Lunes","Tue":"Martes","Wed":"Miércoles",
            "Thu":"Jueves","Fri":"Viernes","Sat":"Sábado","Sun":"Domingo"}
 
+BEST_DAYS_MAX_HOURS = 24
+BEST_DAYS_MIN_N = 10
+DOW_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+def get_aircraft_list(df, vuelo):
+    if "Avión" not in df.columns:
+        return ""
+    vals = df[df["Vuelo"] == vuelo]["Avión"].dropna().astype(str)
+    vals = vals[vals != ""]
+    limpio = sorted({v for v in vals if not v.isdigit() or len(v) >= 3})
+    return ", ".join(limpio)
+
 def get_aircraft_mode(df, vuelo):
-    """Modelo más frecuente para un vuelo (para promedios/curvas)."""
     if "Avión" not in df.columns:
         return ""
     vals = df[df["Vuelo"] == vuelo]["Avión"].dropna()
@@ -83,7 +85,6 @@ def get_aircraft_mode(df, vuelo):
     return str(vals.mode().iloc[0])
 
 def get_aircraft_last(df, vuelo, fecha=None):
-    """Último modelo observado para un vuelo (para fechas específicas)."""
     if "Avión" not in df.columns:
         return ""
     sub = df[df["Vuelo"] == vuelo]
@@ -96,7 +97,6 @@ def get_aircraft_last(df, vuelo, fecha=None):
         return ""
     return str(vals.iloc[-1])
 
-# ── LOESS smoothing ────────────────────────────────────────────────────────────
 def loess_smooth(xs, ys, bandwidth=0.4):
     xs, ys = np.array(xs), np.array(ys)
     n = len(xs)
@@ -112,8 +112,7 @@ def loess_smooth(xs, ys, bandwidth=0.4):
         u = dists[idx] / max_d
         w = (1 - u**3)**3
         w = np.maximum(w, 0)
-        X = xs[idx]
-        Y = ys[idx]
+        X = xs[idx]; Y = ys[idx]
         sw = w.sum()
         xbar = (w * X).sum() / sw
         ybar = (w * Y).sum() / sw
@@ -129,7 +128,7 @@ def compute_ci(xs, ys, smoothed, confidence=0.80):
     n = len(xs)
     window = max(3, int(0.2 * n))
     upper, lower = [], []
-    z = 1.28  # 80% CI
+    z = 1.28
     for i in range(n):
         lo, hi = max(0, i - window), min(n - 1, i + window)
         local_var = residuals[lo:hi+1].mean()
@@ -138,7 +137,6 @@ def compute_ci(xs, ys, smoothed, confidence=0.80):
         lower.append(float(np.clip(smoothed[i] - se, 0, 7)))
     return upper, lower
 
-# ── Google Sheets ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def load_sheet(sheet_name):
     scopes = [
@@ -182,6 +180,44 @@ def compute_hours_before(df, flight_times):
     df["hours_before"] = (df["flight_dt"] - df["Timestamp consulta"]).dt.total_seconds() / 3600
     return df[(df["hours_before"] >= 0) & (df["hours_before"] <= 220)]
 
+@st.cache_data(ttl=300)
+def compute_best_days_table(routes):
+    filas = []
+    for r in routes:
+        df_r = load_sheet(r)
+        if df_r.empty:
+            continue
+        df_h = compute_hours_before(df_r, FLIGHT_TIMES)
+        df_h = df_h[df_h["hours_before"] <= BEST_DAYS_MAX_HOURS]
+        if df_h.empty:
+            continue
+        idx = df_h.groupby(["Vuelo", "Fecha vuelo"])["hours_before"].idxmin()
+        cercanas = df_h.loc[idx].copy()
+        cercanas["clase"] = cercanas["Vuelo"].apply(lambda v: key_class(v, r))
+        def _valor(row):
+            c = row["clase"]
+            return row[c] if c in row and pd.notna(row[c]) else np.nan
+        cercanas["valor"] = cercanas.apply(_valor, axis=1)
+        for vuelo, grp in cercanas.groupby("Vuelo"):
+            n = len(grp)
+            if n < BEST_DAYS_MIN_N:
+                continue
+            clase = grp["clase"].iloc[0]
+            fila = {
+                "ruta": r, "Vuelo": vuelo,
+                "avion": get_aircraft_list(df_r, vuelo),
+                "clase": clase, "n": n,
+                "prom": round(float(grp["valor"].mean()), 1),
+                "ge2_pct": round(float((grp["valor"] >= 2).mean() * 100), 1),
+            }
+            por_dia = grp.groupby("dow")["valor"].mean()
+            for d in DOW_ORDER:
+                fila[d] = round(float(por_dia[d]), 1) if d in por_dia.index else None
+            filas.append(fila)
+    if not filas:
+        return pd.DataFrame()
+    return pd.DataFrame(filas).sort_values("ge2_pct", ascending=False)
+
 def build_interpolated_grid(df_h, cls, grid=None):
     if grid is None:
         grid = np.arange(0, 201, 1, dtype=float)
@@ -223,7 +259,7 @@ with st.sidebar:
     st.header("Filtros")
     route = st.selectbox("Ruta", ROUTES)
     st.divider()
-    view = st.radio("Vista", ["📊 Heatmap por fecha", "📈 Curva vs tiempo", "📅 Evolución de una fecha"])
+    view = st.radio("Vista", ["📊 Heatmap por fecha", "📈 Curva vs tiempo", "📅 Evolución de una fecha", "🗓️ Mejores días para ascender"])
 
 df = load_sheet(route)
 if df.empty:
@@ -319,64 +355,31 @@ elif view == "📈 Curva vs tiempo":
         label = f"{vuelo} {dep}{ac_str} ({cls})"
         xs_raw = sub_all["hours_before"].values
         ys_raw = sub_all[cls].values.astype(float)
-        traces.append({
-            "x": xs_raw.tolist(), "y": ys_raw.tolist(),
-            "type": "scatter", "mode": "markers",
-            "name": f"{vuelo} observaciones",
-            "marker": {"color": color_line, "size": 5, "opacity": 0.3},
-            "showlegend": False,
-            "hovertemplate": "%{x:.0f}h antes · " + cls + "=%{y}<extra></extra>",
-        })
-        traces.append({
-            "x": x_grid.tolist() + x_grid.tolist()[::-1],
-            "y": up_grid.tolist() + lo_grid.tolist()[::-1],
-            "fill": "toself", "fillcolor": color_band,
-            "line": {"color": "rgba(0,0,0,0)"},
-            "showlegend": False, "hoverinfo": "skip",
-            "type": "scatter", "mode": "lines",
-        })
-        hover_txt = [
-            f"<b>{x:.0f}h antes del vuelo</b><br>Tendencia: {s:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]"
-            for x, s, lo, up in zip(x_grid, sm_grid, lo_grid, up_grid)
-        ]
-        traces.append({
-            "x": x_grid.tolist(), "y": sm_grid.tolist(),
-            "type": "scatter", "mode": "lines",
-            "name": label,
-            "line": {"color": color_line, "width": 2.5},
-            "text": hover_txt,
-            "hovertemplate": "%{text}<extra>" + vuelo + "</extra>",
-        })
+        traces.append({"x": xs_raw.tolist(), "y": ys_raw.tolist(), "type": "scatter", "mode": "markers",
+            "name": f"{vuelo} observaciones", "marker": {"color": color_line, "size": 5, "opacity": 0.3},
+            "showlegend": False, "hovertemplate": "%{x:.0f}h antes · " + cls + "=%{y}<extra></extra>"})
+        traces.append({"x": x_grid.tolist() + x_grid.tolist()[::-1], "y": up_grid.tolist() + lo_grid.tolist()[::-1],
+            "fill": "toself", "fillcolor": color_band, "line": {"color": "rgba(0,0,0,0)"},
+            "showlegend": False, "hoverinfo": "skip", "type": "scatter", "mode": "lines"})
+        hover_txt = [f"<b>{x:.0f}h antes del vuelo</b><br>Tendencia: {s:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]"
+            for x, s, lo, up in zip(x_grid, sm_grid, lo_grid, up_grid)]
+        traces.append({"x": x_grid.tolist(), "y": sm_grid.tolist(), "type": "scatter", "mode": "lines",
+            "name": label, "line": {"color": color_line, "width": 2.5}, "text": hover_txt,
+            "hovertemplate": "%{text}<extra>" + vuelo + "</extra>"})
     if traces:
-        layout = {
-            "height": 440,
-            "xaxis": {
-                "autorange": "reversed",
-                "title": "Horas antes del vuelo",
-                "tickvals": list(range(0, 200, 24)),
-                "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 9)],
-                "gridcolor": "rgba(128,128,128,0.1)",
-            },
-            "yaxis": {
-                "title": "Disponibilidad",
-                "range": [0, 7.5],
-                "tickvals": list(range(0, 8)),
-                "ticktext": ["0","1","2","3","4","5","6","7+"],
-                "gridcolor": "rgba(128,128,128,0.1)",
-            },
+        layout = {"height": 440,
+            "xaxis": {"autorange": "reversed", "title": "Horas antes del vuelo",
+                "tickvals": list(range(0, 200, 24)), "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 9)],
+                "gridcolor": "rgba(128,128,128,0.1)"},
+            "yaxis": {"title": "Disponibilidad", "range": [0, 7.5], "tickvals": list(range(0, 8)),
+                "ticktext": ["0","1","2","3","4","5","6","7+"], "gridcolor": "rgba(128,128,128,0.1)"},
             "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02},
             "margin": {"l": 40, "r": 20, "t": 40, "b": 40},
-            "plot_bgcolor": "rgba(0,0,0,0)",
-            "paper_bgcolor": "rgba(0,0,0,0)",
-        }
+            "plot_bgcolor": "rgba(0,0,0,0)", "paper_bgcolor": "rgba(0,0,0,0)"}
         st.plotly_chart({"data": traces, "layout": layout}, use_container_width=True)
         st.caption("← Más días antes del vuelo  |  Momento del vuelo →  · Banda angosta = patrón predecible · Banda ancha = alta varianza")
-    # Tabla de cortes
+    CUTS = {"7d": 7*24, "6d": 6*24, "5d": 5*24, "4d": 4*24, "3d": 3*24, "2d": 2*24, "1d": 1*24, "12h": 12, "6h": 6, "3h": 3}
     st.subheader("Disponibilidad promedio por corte de tiempo")
-    CUTS = {
-        "7d": 7*24, "6d": 6*24, "5d": 5*24, "4d": 4*24,
-        "3d": 3*24, "2d": 2*24, "1d": 1*24, "12h": 12, "6h": 6, "3h": 3,
-    }
     rows = []
     for vuelo in sel_flights:
         sub = df_h[df_h["Vuelo"] == vuelo].copy()
@@ -389,10 +392,7 @@ elif view == "📈 Curva vs tiempo":
         _, gm_cut, _, _ = build_interpolated_grid(sub, cls)
         row = {"Vuelo": f"{vuelo} {dep}{ac_str}", "Clase": cls}
         for cut_label, h_target in CUTS.items():
-            if h_target <= 200:
-                row[cut_label] = round(float(gm_cut[h_target]), 1)
-            else:
-                row[cut_label] = None
+            row[cut_label] = round(float(gm_cut[h_target]), 1) if h_target <= 200 else None
         rows.append(row)
     if rows:
         tbl = pd.DataFrame(rows).set_index("Vuelo")
@@ -404,9 +404,7 @@ elif view == "📈 Curva vs tiempo":
             elif val >= 1:   return "background-color:#F7C1C1;color:#5a0000;font-weight:bold"
             else:            return "background-color:#FCEBEB;color:#8a0000;font-weight:bold"
         num_cols = [c for c in tbl.columns if c != "Clase"]
-        st.dataframe(tbl.style.map(color_cut, subset=num_cols).format("{:.1f}", subset=num_cols, na_rep="—"),
-                     use_container_width=True)
-    # Tabla detalle por vuelo y fecha
+        st.dataframe(tbl.style.map(color_cut, subset=num_cols).format("{:.1f}", subset=num_cols, na_rep="—"), use_container_width=True)
     st.subheader("Detalle por vuelo y fecha")
     st.caption("Cada fila es un vuelo en una fecha específica. Mismo color que la tabla de promedios.")
     detail_rows = []
@@ -423,11 +421,7 @@ elif view == "📈 Curva vs tiempo":
             fecha_short = fecha.split(" ")[0] if " " in fecha else fecha
             ac_last = get_aircraft_last(sub_v, vuelo, fecha)
             ac_str2 = f" ({ac_last})" if ac_last else ""
-            row = {
-                "Vuelo": f"{vuelo} {dep}{ac_str2}",
-                "Fecha": f"{fecha_short} ({dow_es})",
-                "Clase": cls,
-            }
+            row = {"Vuelo": f"{vuelo} {dep}{ac_str2}", "Fecha": f"{fecha_short} ({dow_es})", "Clase": cls}
             for cut_label, h_target in CUTS.items():
                 _, gm_d, _, _ = build_interpolated_grid(sub_f, cls)
                 row[cut_label] = round(float(gm_d[h_target]), 1) if h_target <= 200 else None
@@ -435,11 +429,7 @@ elif view == "📈 Curva vs tiempo":
     if detail_rows:
         dtbl = pd.DataFrame(detail_rows).set_index(["Vuelo", "Fecha"])
         num_cols_d = [c for c in dtbl.columns if c != "Clase"]
-        styled_dtbl = (dtbl.style
-                          .map(color_cut, subset=num_cols_d)
-                          .format("{:.1f}", subset=num_cols_d, na_rep="—"))
-        st.dataframe(styled_dtbl, use_container_width=True)
-    # Scatter
+        st.dataframe(dtbl.style.map(color_cut, subset=num_cols_d).format("{:.1f}", subset=num_cols_d, na_rep="—"), use_container_width=True)
     st.divider()
     st.subheader("Dispersión de observaciones individuales")
     st.caption("Cada punto es una medición real.")
@@ -453,36 +443,26 @@ elif view == "📈 Curva vs tiempo":
         dep = FLIGHT_TIMES.get(vuelo, "")
         ac_sc = get_aircraft_mode(sub, vuelo)
         ac_sc_str = f" ({ac_sc})" if ac_sc else ""
-        hover_sc = [
-            f"<b>{vuelo} {dep}{ac_sc_str}</b><br>{h:.0f}h antes<br>{cls} = {v:.0f}<br>{fv}"
-            for h, v, fv in zip(sub["hours_before"], sub[cls], sub["Fecha vuelo"])
-        ]
-        sc_traces.append({
-            "x": sub["hours_before"].tolist(), "y": sub[cls].tolist(),
-            "type": "scatter", "mode": "markers",
-            "name": f"{vuelo} ({cls})",
+        hover_sc = [f"<b>{vuelo} {dep}{ac_sc_str}</b><br>{h:.0f}h antes<br>{cls} = {v:.0f}<br>{fv}"
+            for h, v, fv in zip(sub["hours_before"], sub[cls], sub["Fecha vuelo"])]
+        sc_traces.append({"x": sub["hours_before"].tolist(), "y": sub[cls].tolist(),
+            "type": "scatter", "mode": "markers", "name": f"{vuelo} ({cls})",
             "marker": {"color": color_line, "size": 7, "opacity": 0.6, "line": {"color": "white", "width": 0.5}},
-            "text": hover_sc, "hovertemplate": "%{text}<extra></extra>",
-        })
+            "text": hover_sc, "hovertemplate": "%{text}<extra></extra>"})
     if sc_traces:
-        sc_layout = {
-            "height": 380,
+        sc_layout = {"height": 380,
             "xaxis": {"autorange": "reversed", "title": "Horas antes del vuelo",
-                      "tickvals": list(range(0, 200, 24)),
-                      "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 9)],
-                      "gridcolor": "rgba(128,128,128,0.1)"},
-            "yaxis": {"title": "Disponibilidad", "range": [-0.3, 7.5],
-                      "tickvals": list(range(0, 8)),
-                      "ticktext": ["0","1","2","3","4","5","6","7+"],
-                      "gridcolor": "rgba(128,128,128,0.1)"},
+                "tickvals": list(range(0, 200, 24)), "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 9)],
+                "gridcolor": "rgba(128,128,128,0.1)"},
+            "yaxis": {"title": "Disponibilidad", "range": [-0.3, 7.5], "tickvals": list(range(0, 8)),
+                "ticktext": ["0","1","2","3","4","5","6","7+"], "gridcolor": "rgba(128,128,128,0.1)"},
             "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02},
             "margin": {"l": 40, "r": 20, "t": 40, "b": 40},
-            "plot_bgcolor": "rgba(0,0,0,0)", "paper_bgcolor": "rgba(0,0,0,0)",
-        }
+            "plot_bgcolor": "rgba(0,0,0,0)", "paper_bgcolor": "rgba(0,0,0,0)"}
         st.plotly_chart({"data": sc_traces, "layout": sc_layout}, use_container_width=True)
 
 # ── Vista 3: Evolución de una fecha específica ─────────────────────────────────
-else:
+elif view == "📅 Evolución de una fecha":
     st.subheader(f"Evolución histórica de una fecha de vuelo — {route}")
     st.caption("Fecha pasada: línea real. Fecha futura: línea real hasta hoy + proyección ajustada al valor actual.")
     col1, col2 = st.columns(2)
@@ -512,8 +492,7 @@ else:
     dep = FLIGHT_TIMES.get(vuelo_sel, "")
     ac_evol = get_aircraft_last(sub, vuelo_sel, fecha_sel)
     ac_evol_str = f" ({ac_evol})" if ac_evol else ""
-    flight_date_parsed = pd.to_datetime(
-        fecha_sel.split(" ")[0] if " " in fecha_sel else fecha_sel, errors="coerce")
+    flight_date_parsed = pd.to_datetime(fecha_sel.split(" ")[0] if " " in fecha_sel else fecha_sel, errors="coerce")
     dep_h, dep_m = map(int, dep.split(":")) if dep else (0, 0)
     flight_dt = flight_date_parsed.replace(hour=dep_h, minute=dep_m) if pd.notna(flight_date_parsed) else None
     is_future = flight_dt is not None and flight_dt > datetime.now()
@@ -529,37 +508,24 @@ else:
         sub["hours_before_obs"] = (flight_dt_obs - sub["Timestamp consulta"]).dt.total_seconds() / 3600
     else:
         sub["hours_before_obs"] = 0
-    hover_obs = [
-        f"<b>{h:.0f}h antes del vuelo</b><br>{cls} = {v}<br>{ts}"
-        for h, v, ts in zip(sub["hours_before_obs"], sub[cls],
-                            sub["Timestamp consulta"].dt.strftime("%d/%m %H:%M"))
-    ]
-    ev_traces.append({
-        "x": sub["hours_before_obs"].tolist(),
-        "y": sub[cls].tolist(),
-        "type": "scatter", "mode": "lines+markers",
-        "name": "Observado",
-        "line": {"color": "#185FA5", "width": 2.5},
-        "marker": {"size": 7, "color": "#185FA5"},
-        "text": hover_obs,
-        "hovertemplate": "%{text}<extra>Observado</extra>",
-    })
+    hover_obs = [f"<b>{h:.0f}h antes del vuelo</b><br>{cls} = {v}<br>{ts}"
+        for h, v, ts in zip(sub["hours_before_obs"], sub[cls], sub["Timestamp consulta"].dt.strftime("%d/%m %H:%M"))]
+    ev_traces.append({"x": sub["hours_before_obs"].tolist(), "y": sub[cls].tolist(),
+        "type": "scatter", "mode": "lines+markers", "name": "Observado",
+        "line": {"color": "#185FA5", "width": 2.5}, "marker": {"size": 7, "color": "#185FA5"},
+        "text": hover_obs, "hovertemplate": "%{text}<extra>Observado</extra>"})
     prob = None
     if is_future and flight_dt is not None:
         current_val = float(sub[cls].iloc[-1])
         current_ts  = sub["Timestamp consulta"].iloc[-1]
         hours_now   = (flight_dt - current_ts).total_seconds() / 3600
-        hist = compute_hours_before(
-            df[(df["Vuelo"] == vuelo_sel) & (df["Fecha vuelo"] != fecha_sel)].copy(),
-            FLIGHT_TIMES
-        )
+        hist = compute_hours_before(df[(df["Vuelo"] == vuelo_sel) & (df["Fecha vuelo"] != fecha_sel)].copy(), FLIGHT_TIMES)
         if len(hist) >= 5 and cls in hist.columns:
             hist = hist.sort_values("hours_before", ascending=False)
             from numpy import interp
             flight_dow = flight_date_parsed.strftime("%a") if pd.notna(flight_date_parsed) else None
             hist_dow = hist[hist["dow"] == flight_dow].copy() if (
-                flight_dow and "dow" in hist.columns and
-                len(hist[hist["dow"] == flight_dow]) >= 3
+                flight_dow and "dow" in hist.columns and len(hist[hist["dow"] == flight_dow]) >= 3
             ) else hist.copy()
             hist_dow["bucket"] = (hist_dow["hours_before"] / 12).round() * 12
             buckets = hist_dow.groupby("bucket")[cls].agg(["mean","std","count"]).reset_index()
@@ -567,14 +533,12 @@ else:
             buckets["std"] = buckets["std"].fillna(0)
             n_proj = 40
             proj_hours = np.linspace(hours_now, 0, n_proj)
-            valid_proj = False
             n_hist_dates = len(hist_dow["Fecha vuelo"].unique())
             if len(buckets) >= 3:
                 b_xs   = buckets["bucket"].values.astype(float)
                 b_mean = buckets["mean"].values.astype(float)
                 b_std  = buckets["std"].values.astype(float)
-                hist_at_now   = float(np.clip(interp(hours_now, b_xs, b_mean), 0.001, 7))
-                hist_at_close = float(np.clip(interp(0, b_xs, b_mean), 0, 7))
+                hist_at_now  = float(np.clip(interp(hours_now, b_xs, b_mean), 0.001, 7))
                 hist_at_proj = interp(proj_hours, b_xs, b_mean)
                 std_at_proj  = np.clip(interp(proj_hours, b_xs, b_std), 0, 3)
                 scale = current_val / hist_at_now if hist_at_now > 0 else 1.0
@@ -584,30 +548,19 @@ else:
                 proj_smooth[0] = float(current_val)
                 proj_upper[0]  = float(np.clip(current_val * (1 + 1.28 * float(interp(hours_now, b_xs, b_std)) / hist_at_now), 0, 7))
                 proj_lower[0]  = float(np.clip(current_val * (1 - 1.28 * float(interp(hours_now, b_xs, b_std)) / hist_at_now), 0, 7))
-                ev_traces.append({
-                    "x": proj_hours.tolist() + proj_hours.tolist()[::-1],
+                ev_traces.append({"x": proj_hours.tolist() + proj_hours.tolist()[::-1],
                     "y": proj_upper.tolist() + proj_lower.tolist()[::-1],
-                    "fill": "toself", "fillcolor": "rgba(24,95,165,0.10)",
-                    "line": {"color": "rgba(0,0,0,0)"},
-                    "showlegend": False, "hoverinfo": "skip",
-                    "type": "scatter", "mode": "lines",
-                })
-                hover_proj = [
-                    f"<b>{h:.0f}h antes del vuelo</b><br>{cls} estimado: {v:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]<br>Basado en {n_hist_dates} fecha(s) históricas"
-                    for h, v, lo, up in zip(proj_hours, proj_smooth, proj_lower, proj_upper)
-                ]
-                ev_traces.append({
-                    "x": proj_hours.tolist(), "y": proj_smooth.tolist(),
-                    "type": "scatter", "mode": "lines",
-                    "name": "Proyección ajustada",
+                    "fill": "toself", "fillcolor": "rgba(24,95,165,0.10)", "line": {"color": "rgba(0,0,0,0)"},
+                    "showlegend": False, "hoverinfo": "skip", "type": "scatter", "mode": "lines"})
+                hover_proj = [f"<b>{h:.0f}h antes del vuelo</b><br>{cls} estimado: {v:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]<br>Basado en {n_hist_dates} fecha(s) históricas"
+                    for h, v, lo, up in zip(proj_hours, proj_smooth, proj_lower, proj_upper)]
+                ev_traces.append({"x": proj_hours.tolist(), "y": proj_smooth.tolist(),
+                    "type": "scatter", "mode": "lines", "name": "Proyección ajustada",
                     "line": {"color": "#185FA5", "width": 2, "dash": "dash"},
-                    "text": hover_proj,
-                    "hovertemplate": "%{text}<extra>Proyección</extra>",
-                })
-                valid_proj = True
+                    "text": hover_proj, "hovertemplate": "%{text}<extra>Proyección</extra>"})
                 if n_hist_dates < 4:
                     st.warning(f"⚠️ Proyección basada en solo {n_hist_dates} fecha(s) histórica(s) del mismo día — alta incertidumbre.")
-                proj_at_close = float(proj_smooth[-1])
+                proj_at_close     = float(proj_smooth[-1])
                 ci_lower_at_close = float(proj_lower[-1])
                 ci_upper_at_close = float(proj_upper[-1])
                 if ci_upper_at_close > ci_lower_at_close:
@@ -617,47 +570,64 @@ else:
                 else:
                     prob = 1.0 if proj_at_close >= cupos_min else 0.0
                 n_hist = n_hist_dates
-    ev_layout = {
-        "height": 400,
-        "xaxis": {
-            "autorange": "reversed",
-            "title": "Horas antes del vuelo",
-            "tickvals": list(range(0, 220, 24)),
-            "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 10)],
-            "gridcolor": "rgba(128,128,128,0.1)",
-        },
-        "yaxis": {
-            "title": f"Disponibilidad ({cls})",
-            "range": [-0.3, 7.5],
-            "tickvals": list(range(0, 8)),
-            "ticktext": ["0","1","2","3","4","5","6","7+"],
-            "gridcolor": "rgba(128,128,128,0.1)",
-        },
+    ev_layout = {"height": 400,
+        "xaxis": {"autorange": "reversed", "title": "Horas antes del vuelo",
+            "tickvals": list(range(0, 220, 24)), "ticktext": [f"{i}d" if i > 0 else "✈" for i in range(0, 10)],
+            "gridcolor": "rgba(128,128,128,0.1)"},
+        "yaxis": {"title": f"Disponibilidad ({cls})", "range": [-0.3, 7.5],
+            "tickvals": list(range(0, 8)), "ticktext": ["0","1","2","3","4","5","6","7+"],
+            "gridcolor": "rgba(128,128,128,0.1)"},
         "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02},
         "margin": {"l": 40, "r": 20, "t": 40, "b": 40},
-        "plot_bgcolor": "rgba(0,0,0,0)",
-        "paper_bgcolor": "rgba(0,0,0,0)",
-    }
+        "plot_bgcolor": "rgba(0,0,0,0)", "paper_bgcolor": "rgba(0,0,0,0)"}
     st.plotly_chart({"data": ev_traces, "layout": ev_layout}, use_container_width=True)
     if is_future and prob is not None:
         pct = int(round(prob * 100))
-        if pct >= 70:
-            color = "🟢"
-        elif pct >= 40:
-            color = "🟡"
-        else:
-            color = "🔴"
-        st.metric(
-            label=f"{color} Probabilidad de {cupos_min}+ cupos {cls} al cierre",
-            value=f"{pct}%",
-            help=f"Basado en {n_hist} vuelos históricos similares. Proyección anclada al valor actual ({current_val:.0f} cupos) aplicando la forma histórica de caída."
-        )
+        color = "🟢" if pct >= 70 else ("🟡" if pct >= 40 else "🔴")
+        st.metric(label=f"{color} Probabilidad de {cupos_min}+ cupos {cls} al cierre", value=f"{pct}%",
+            help=f"Basado en {n_hist} vuelos históricos similares. Proyección anclada al valor actual ({current_val:.0f} cupos) aplicando la forma histórica de caída.")
     elif not is_future:
         st.caption("Vuelo ya ocurrido — mostrando el historial real completo.")
     with st.expander("Ver todas las lecturas"):
         tbl2 = sub[["Timestamp consulta", cls, "Fecha vuelo"]].copy()
         tbl2["Timestamp consulta"] = tbl2["Timestamp consulta"].dt.strftime("%d/%m/%Y %H:%M")
         st.dataframe(tbl2.reset_index(drop=True), use_container_width=True)
+
+# ── Vista 4: Mejores días para ascender ────────────────────────────────────────
+elif view == "🗓️ Mejores días para ascender":
+    st.subheader("Mejores días para ascender")
+    st.caption(
+        f"Solo se usan mediciones tomadas hasta {BEST_DAYS_MAX_HOURS}h antes de la salida real "
+        "del vuelo. Clase = C para Avianca, W para LATAM en rutas narrow body, J para el resto. "
+        "Considera todas las rutas."
+    )
+    tabla_bd = compute_best_days_table(tuple(ROUTES))
+    if tabla_bd.empty:
+        st.info("No hay suficientes mediciones cercanas a la salida todavía.")
+    else:
+        rutas_bd = ["Todas"] + sorted(tabla_bd["ruta"].unique())
+        ruta_bd_sel = st.selectbox("Filtrar por ruta", rutas_bd, key="best_days_ruta")
+        vista_bd = tabla_bd if ruta_bd_sel == "Todas" else tabla_bd[tabla_bd["ruta"] == ruta_bd_sel]
+        cols_mostrar = ["ruta", "Vuelo", "avion", "clase", "n"] + DOW_ORDER
+        tabla_fmt = vista_bd[cols_mostrar].rename(columns=DOW_ES).rename(
+            columns={"ruta": "Ruta", "avion": "Avión", "clase": "Clase"})
+        dias_es_cols = [DOW_ES[d] for d in DOW_ORDER]
+        def color_bd(val):
+            if pd.isna(val): return "color:#ccc"
+            if val >= 6:   return "background-color:#4CAF50;color:white;font-weight:bold"
+            elif val >= 4: return "background-color:#C0DD97;color:#1a3a00;font-weight:bold"
+            elif val >= 2: return "background-color:#FAC775;color:#4a2800;font-weight:bold"
+            elif val >= 1: return "background-color:#F7C1C1;color:#5a0000;font-weight:bold"
+            else:          return "background-color:#FCEBEB;color:#8a0000;font-weight:bold"
+        styled_bd = tabla_fmt.style.map(color_bd, subset=dias_es_cols).format("{:.1f}", subset=dias_es_cols, na_rep="—")
+        st.dataframe(styled_bd, use_container_width=True, hide_index=True)
+        if not vista_bd.empty:
+            mejor = vista_bd.iloc[0]
+            st.caption(
+                f"Mejor vuelo actual: **{mejor['Vuelo']}** ({mejor['ruta']}, {mejor['avion']}) — "
+                f"{mejor['ge2_pct']:.0f}% de las últimas mediciones antes de salir tuvieron 2+ cupos "
+                f"en clase {mejor['clase']}."
+            )
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.divider()
