@@ -62,7 +62,7 @@ def key_class(vuelo, route):
     if vuelo.startswith("AV"):
         return "C"
     # LATAM narrow body (MIA, LIM): W is the premium cabin
-    if vuelo.startswith("LA") and route in MIA_ROUTES | LIM_ROUTES:
+    if vuelo.startswith("LA") and route in MIA_ROUTES.union(LIM_ROUTES):
         return "W"
     # LATAM wide body GRU: W is PE
     if vuelo.startswith("LA") and route in GRU_ROUTES:
