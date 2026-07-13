@@ -2,7 +2,6 @@
 Dashboard de disponibilidad Business — EF Scraper
 Lee datos de Google Sheets en tiempo real
 """
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,6 +11,11 @@ from datetime import datetime
 
 GSHEET_ID = "1gHQNU564qiWArnZYLjXfJm7wbi49JRtpuQgKEwTml-A"
 ROUTES = ["BOG-SCL", "SCL-BOG", "BOG-MAD", "MAD-BOG", "BOG-GRU", "GRU-BOG", "GRU-MAD", "MAD-GRU", "BOG-AEP", "AEP-BOG", "BOG-EZE", "EZE-BOG", "BOG-MIA", "MIA-BOG", "BOG-LIM", "LIM-BOG"]
+
+# Route type sets — must be defined before key_class
+GRU_ROUTES = {"BOG-GRU", "GRU-BOG"}
+MIA_ROUTES = {"BOG-MIA", "MIA-BOG"}
+LIM_ROUTES = {"BOG-LIM", "LIM-BOG"}
 
 FLIGHT_TIMES = {
     "LA575": "06:35", "LA711": "23:10",
@@ -38,7 +42,7 @@ FLIGHT_TIMES = {
     "IB271":  "11:50", "LA8075": "14:45",
     "LA8065": "23:45", "IB267":  "23:55",
     "UX57":   "23:55",
-    # BOG-MIA / MIA-BOG (EK fifth freedom via MIA)
+    # BOG-MIA / MIA-BOG
     "EK213":  "12:05", "EK214":  "17:19",
     # BOG-LIM / LIM-BOG
     "AV49":   "05:00", "AV51":   "07:30", "AV53":   "09:30",
@@ -52,23 +56,18 @@ FLIGHT_TIMES = {
 }
 
 def key_class(vuelo, route):
-    # Emirates Business: J is least restrictive paid biz
     if vuelo.startswith("EK"):
         return "J"
-    # American Airlines First on narrow body
     if vuelo.startswith("AA"):
         return "F"
-    # Avianca Business: C is least restrictive
     if vuelo.startswith("AV"):
         return "C"
-    # LATAM narrow body (MIA, LIM): W is the premium cabin
     if vuelo.startswith("LA") and route in MIA_ROUTES.union(LIM_ROUTES):
         return "W"
-    # LATAM wide body GRU: W is PE
     if vuelo.startswith("LA") and route in GRU_ROUTES:
         return "W"
-    # Default: J for IB, UX, LA wide body
     return "J"
+
 
 DOW_ES = {"Mon":"Lunes","Tue":"Martes","Wed":"Miércoles",
            "Thu":"Jueves","Fri":"Viernes","Sat":"Sábado","Sun":"Domingo"}
@@ -151,7 +150,6 @@ def load_sheet(sheet_name):
             st.secrets["gcp_service_account"], scopes=scopes)
     except Exception:
         creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-
     client = gspread.authorize(creds)
     gsheet = client.open_by_key(GSHEET_ID)
     try:
@@ -160,7 +158,7 @@ def load_sheet(sheet_name):
         if len(data) < 2:
             return pd.DataFrame()
         df = pd.DataFrame(data[1:], columns=data[0])
-        for col in ["J","C","D","I","W","P"]:
+        for col in ["J","C","D","I","W","P","F","A","O"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
         df["Timestamp consulta"] = pd.to_datetime(df["Timestamp consulta"], errors="coerce")
@@ -173,7 +171,6 @@ def load_sheet(sheet_name):
         st.error(f"Error cargando '{sheet_name}': {e}")
         return pd.DataFrame()
 
-
 def compute_hours_before(df, flight_times):
     df = df.copy()
     df["flight_dt"] = pd.NaT
@@ -185,23 +182,9 @@ def compute_hours_before(df, flight_times):
     df["hours_before"] = (df["flight_dt"] - df["Timestamp consulta"]).dt.total_seconds() / 3600
     return df[(df["hours_before"] >= 0) & (df["hours_before"] <= 220)]
 
-
 def build_interpolated_grid(df_h, cls, grid=None):
-    """
-    Para cada vuelo/fecha, interpola J en una grilla densa de 0-200h.
-
-    Reglas:
-    - h > hx.max(): extender con el primer valor observado (no había scraping aún)
-    - Entre observaciones: interpolar linealmente
-    - h < hx.min(): NaN — no sabemos qué pasó, se excluye del promedio
-      EXCEPCIÓN: si el último valor observado es J=0 (vuelo cerrado),
-      extender con 0 hacia el cierre (sabemos que ya cerró)
-
-    Promedio y CI calculados ignorando NaN (np.nanmean / np.nanstd).
-    """
     if grid is None:
         grid = np.arange(0, 201, 1, dtype=float)
-
     all_curves = []
     for (fecha, vuelo), grp in df_h.groupby(["Fecha vuelo", "Vuelo"]):
         grp = grp.sort_values("hours_before", ascending=False)
@@ -209,34 +192,27 @@ def build_interpolated_grid(df_h, cls, grid=None):
         hy = grp[cls].values.astype(float)
         if len(hx) < 2:
             continue
-
-        last_observed_j = hy[-1]  # valor en la observación más cercana al vuelo
+        last_observed_j = hy[-1]
         curve = np.full(len(grid), np.nan)
-
         for i, h in enumerate(grid):
             if h > hx.max():
-                curve[i] = hy[0]          # antes del primer scraping: extender
+                curve[i] = hy[0]
             elif h >= hx.min():
-                curve[i] = float(np.interp(h, hx[::-1], hy[::-1]))  # interpolar
+                curve[i] = float(np.interp(h, hx[::-1], hy[::-1]))
             else:
-                # h < hx.min(): después del último scraping
                 if last_observed_j == 0:
-                    curve[i] = 0.0        # vuelo cerrado: sabemos que es 0
+                    curve[i] = 0.0
                 else:
-                    curve[i] = np.nan     # sin dato: excluir del promedio
-
+                    curve[i] = np.nan
         all_curves.append(curve)
-
     if not all_curves:
         return grid, np.zeros(len(grid)), np.zeros(len(grid)), np.zeros(len(grid))
-
-    arr   = np.array(all_curves)  # shape: (n_flights, n_grid)
+    arr   = np.array(all_curves)
     mean  = np.nanmean(arr, axis=0)
     std   = np.nanstd(arr, axis=0)
     upper = np.clip(mean + 1.28 * std, 0, 7)
     lower = np.clip(mean - 1.28 * std, 0, 7)
     return grid, mean, upper, lower
-
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="EF Availability", page_icon="✈️", layout="wide")
@@ -250,7 +226,6 @@ with st.sidebar:
     view = st.radio("Vista", ["📊 Heatmap por fecha", "📈 Curva vs tiempo", "📅 Evolución de una fecha"])
 
 df = load_sheet(route)
-
 if df.empty:
     st.warning("Sin datos para esta ruta todavía.")
     st.stop()
@@ -272,7 +247,6 @@ with st.sidebar:
         sel_days_es = days_opts
 
 df_f = df[df["Vuelo"].isin(sel_flights) & df["dow"].isin(sel_days)]
-
 if df_f.empty:
     st.warning("Sin datos con los filtros seleccionados.")
     st.stop()
@@ -288,10 +262,8 @@ COLORS = [
 if view == "📊 Heatmap por fecha":
     st.subheader(f"Disponibilidad por fecha — {route}")
     st.caption("Última lectura disponible por vuelo y fecha. Verde = amplio, rojo = cerrado.")
-
     latest = (df_f.sort_values("Timestamp consulta")
                   .groupby(["Fecha vuelo", "Vuelo"]).last().reset_index())
-
     for vuelo in sel_flights:
         sub = latest[latest["Vuelo"] == vuelo].sort_values("flight_date")
         if sub.empty:
@@ -306,14 +278,12 @@ if view == "📊 Heatmap por fecha":
         dates = [d.split(" ")[0] if " " in d else d for d in sub["Fecha vuelo"].tolist()]
         vals  = sub[cls].tolist()
         row_df = pd.DataFrame([vals], columns=dates)
-
         def color_cell(val):
             if val >= 7:   return "background-color:#4CAF50;color:white;font-weight:bold"
             elif val >= 5: return "background-color:#C0DD97;color:#1a3a00;font-weight:bold"
             elif val >= 3: return "background-color:#FAC775;color:#4a2800;font-weight:bold"
             elif val >= 1: return "background-color:#F7C1C1;color:#5a0000;font-weight:bold"
             else:          return "background-color:#FCEBEB;color:#8a0000;font-weight:bold"
-
         st.dataframe(row_df.style.map(color_cell).format("{:.0f}"),
                      use_container_width=True, hide_index=True)
         st.divider()
@@ -322,12 +292,10 @@ if view == "📊 Heatmap por fecha":
 elif view == "📈 Curva vs tiempo":
     st.subheader(f"Disponibilidad vs tiempo antes del vuelo — {route}")
     st.caption("Línea = tendencia suavizada (LOESS) · Banda = intervalo de confianza 80% · Puntos = observaciones reales")
-
     df_h = compute_hours_before(df_f, FLIGHT_TIMES)
     if df_h.empty:
         st.warning("Sin datos suficientes para la curva.")
         st.stop()
-
     traces = []
     for i, vuelo in enumerate(sel_flights):
         sub = df_h[df_h["Vuelo"] == vuelo].copy()
@@ -336,30 +304,19 @@ elif view == "📈 Curva vs tiempo":
         cls = key_class(vuelo, route)
         if cls not in sub.columns:
             cls = "J"
-
-        # Bucket a 6h y calcular por punto individual para LOESS
-        # Interpolación continua por vuelo + None=0
         sub_all = df_h[df_h["Vuelo"] == vuelo].copy()
-
         grid_full, gm, gu, gl = build_interpolated_grid(sub_all, cls)
-
-        # Recortar al rango observado
         max_h = sub_all["hours_before"].max()
         mask_g = (grid_full <= max_h) & ~np.isnan(gm)
-        x_grid  = grid_full[mask_g][::-1]  # descending
-        sm_grid = gm[mask_g][::-1]          # mean directo de la grilla (no LOESS)
+        x_grid  = grid_full[mask_g][::-1]
+        sm_grid = gm[mask_g][::-1]
         up_grid = gu[mask_g][::-1]
         lo_grid = gl[mask_g][::-1]
-
-        from numpy import interp
-
         color_line, color_band = COLORS[i % len(COLORS)]
         dep = FLIGHT_TIMES.get(vuelo, "")
         ac_mode = get_aircraft_mode(sub_all, vuelo)
         ac_str = f" ({ac_mode})" if ac_mode else ""
         label = f"{vuelo} {dep}{ac_str} ({cls})"
-
-        # Scatter observaciones reales
         xs_raw = sub_all["hours_before"].values
         ys_raw = sub_all[cls].values.astype(float)
         traces.append({
@@ -370,7 +327,6 @@ elif view == "📈 Curva vs tiempo":
             "showlegend": False,
             "hovertemplate": "%{x:.0f}h antes · " + cls + "=%{y}<extra></extra>",
         })
-        # Banda CI
         traces.append({
             "x": x_grid.tolist() + x_grid.tolist()[::-1],
             "y": up_grid.tolist() + lo_grid.tolist()[::-1],
@@ -379,7 +335,6 @@ elif view == "📈 Curva vs tiempo":
             "showlegend": False, "hoverinfo": "skip",
             "type": "scatter", "mode": "lines",
         })
-        # Línea LOESS
         hover_txt = [
             f"<b>{x:.0f}h antes del vuelo</b><br>Tendencia: {s:.1f}<br>IC 80%: [{lo:.1f} – {up:.1f}]"
             for x, s, lo, up in zip(x_grid, sm_grid, lo_grid, up_grid)
@@ -392,7 +347,6 @@ elif view == "📈 Curva vs tiempo":
             "text": hover_txt,
             "hovertemplate": "%{text}<extra>" + vuelo + "</extra>",
         })
-
     if traces:
         layout = {
             "height": 440,
@@ -417,7 +371,6 @@ elif view == "📈 Curva vs tiempo":
         }
         st.plotly_chart({"data": traces, "layout": layout}, use_container_width=True)
         st.caption("← Más días antes del vuelo  |  Momento del vuelo →  · Banda angosta = patrón predecible · Banda ancha = alta varianza")
-
     # Tabla de cortes
     st.subheader("Disponibilidad promedio por corte de tiempo")
     CUTS = {
@@ -433,7 +386,6 @@ elif view == "📈 Curva vs tiempo":
         dep = FLIGHT_TIMES.get(vuelo, "")
         ac_mode = get_aircraft_mode(sub, vuelo)
         ac_str = f" ({ac_mode})" if ac_mode else ""
-        # Build interpolated grid for this vuelo
         _, gm_cut, _, _ = build_interpolated_grid(sub, cls)
         row = {"Vuelo": f"{vuelo} {dep}{ac_str}", "Clase": cls}
         for cut_label, h_target in CUTS.items():
@@ -442,7 +394,6 @@ elif view == "📈 Curva vs tiempo":
             else:
                 row[cut_label] = None
         rows.append(row)
-
     if rows:
         tbl = pd.DataFrame(rows).set_index("Vuelo")
         def color_cut(val):
@@ -455,11 +406,9 @@ elif view == "📈 Curva vs tiempo":
         num_cols = [c for c in tbl.columns if c != "Clase"]
         st.dataframe(tbl.style.map(color_cut, subset=num_cols).format("{:.1f}", subset=num_cols, na_rep="—"),
                      use_container_width=True)
-
-    # ── Tabla detalle por vuelo y fecha ──────────────────────────────────────
+    # Tabla detalle por vuelo y fecha
     st.subheader("Detalle por vuelo y fecha")
     st.caption("Cada fila es un vuelo en una fecha específica. Mismo color que la tabla de promedios.")
-
     detail_rows = []
     for vuelo in sel_flights:
         sub_v = df_h[df_h["Vuelo"] == vuelo].copy()
@@ -467,7 +416,6 @@ elif view == "📈 Curva vs tiempo":
         cls = key_class(vuelo, route)
         if cls not in sub_v.columns: cls = "J"
         dep = FLIGHT_TIMES.get(vuelo, "")
-
         for fecha in sorted(sub_v["Fecha vuelo"].unique()):
             sub_f = sub_v[sub_v["Fecha vuelo"] == fecha]
             dow = sub_f["dow"].iloc[0] if not sub_f.empty else ""
@@ -481,11 +429,9 @@ elif view == "📈 Curva vs tiempo":
                 "Clase": cls,
             }
             for cut_label, h_target in CUTS.items():
-                # Use interpolated grid for this specific flight/date
                 _, gm_d, _, _ = build_interpolated_grid(sub_f, cls)
                 row[cut_label] = round(float(gm_d[h_target]), 1) if h_target <= 200 else None
             detail_rows.append(row)
-
     if detail_rows:
         dtbl = pd.DataFrame(detail_rows).set_index(["Vuelo", "Fecha"])
         num_cols_d = [c for c in dtbl.columns if c != "Clase"]
@@ -493,7 +439,6 @@ elif view == "📈 Curva vs tiempo":
                           .map(color_cut, subset=num_cols_d)
                           .format("{:.1f}", subset=num_cols_d, na_rep="—"))
         st.dataframe(styled_dtbl, use_container_width=True)
-
     # Scatter
     st.divider()
     st.subheader("Dispersión de observaciones individuales")
@@ -540,19 +485,14 @@ elif view == "📈 Curva vs tiempo":
 else:
     st.subheader(f"Evolución histórica de una fecha de vuelo — {route}")
     st.caption("Fecha pasada: línea real. Fecha futura: línea real hasta hoy + proyección ajustada al valor actual.")
-
-    # Selector de vuelo y fecha
     col1, col2 = st.columns(2)
     with col1:
         vuelo_sel = st.selectbox("Vuelo", sel_flights if sel_flights else flights)
     with col2:
-        fechas_disp = sorted(
-            df[df["Vuelo"] == vuelo_sel]["Fecha vuelo"].dropna().unique()
-        )
+        fechas_disp = sorted(df[df["Vuelo"] == vuelo_sel]["Fecha vuelo"].dropna().unique())
         if not fechas_disp:
             st.warning("Sin fechas disponibles para este vuelo.")
             st.stop()
-        # Default: fecha más cercana a hoy+2 días
         target_date = (datetime.now() + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
         default_idx = 0
         for i, f in enumerate(fechas_disp):
@@ -561,48 +501,34 @@ else:
                 default_idx = i
                 break
         fecha_sel = st.selectbox("Fecha del vuelo", fechas_disp, index=default_idx)
-
     sub = df[(df["Vuelo"] == vuelo_sel) & (df["Fecha vuelo"] == fecha_sel)].copy()
     sub = sub.sort_values("Timestamp consulta")
-
     cls = key_class(vuelo_sel, route)
     if cls not in sub.columns:
         cls = "J"
-
     if sub.empty:
         st.warning("Sin datos para esta combinación.")
         st.stop()
-
     dep = FLIGHT_TIMES.get(vuelo_sel, "")
     ac_evol = get_aircraft_last(sub, vuelo_sel, fecha_sel)
     ac_evol_str = f" ({ac_evol})" if ac_evol else ""
-
-    # Determinar si el vuelo ya ocurrió
     flight_date_parsed = pd.to_datetime(
         fecha_sel.split(" ")[0] if " " in fecha_sel else fecha_sel, errors="coerce")
     dep_h, dep_m = map(int, dep.split(":")) if dep else (0, 0)
     flight_dt = flight_date_parsed.replace(hour=dep_h, minute=dep_m) if pd.notna(flight_date_parsed) else None
     is_future = flight_dt is not None and flight_dt > datetime.now()
-
     st.markdown(f"**{vuelo_sel}** {dep}{ac_evol_str} · **{fecha_sel}** · clase `{cls}` · {len(sub)} mediciones")
-
-    # ── Slider de cupos mínimos (solo para vuelos futuros) ──
     if is_future:
         cupos_min = st.slider("Cupos mínimos al cierre para contar como éxito", 1, 4, 2)
     else:
         cupos_min = 2
-
     ev_traces = []
-
-    # Calcular hours_before para la línea observada
     dep_h2, dep_m2 = map(int, dep.split(":")) if dep else (0, 0)
     if pd.notna(flight_date_parsed):
         flight_dt_obs = flight_date_parsed.replace(hour=dep_h2, minute=dep_m2)
         sub["hours_before_obs"] = (flight_dt_obs - sub["Timestamp consulta"]).dt.total_seconds() / 3600
     else:
         sub["hours_before_obs"] = 0
-
-    # Línea real (eje X = horas antes del vuelo, invertido)
     hover_obs = [
         f"<b>{h:.0f}h antes del vuelo</b><br>{cls} = {v}<br>{ts}"
         for h, v, ts in zip(sub["hours_before_obs"], sub[cls],
@@ -618,70 +544,46 @@ else:
         "text": hover_obs,
         "hovertemplate": "%{text}<extra>Observado</extra>",
     })
-
     prob = None
-
     if is_future and flight_dt is not None:
-        # Valor actual (última lectura)
         current_val = float(sub[cls].iloc[-1])
         current_ts  = sub["Timestamp consulta"].iloc[-1]
         hours_now   = (flight_dt - current_ts).total_seconds() / 3600
-
-        # Histórico: mismo vuelo, mismos días de semana, OTRAS fechas
         hist = compute_hours_before(
             df[(df["Vuelo"] == vuelo_sel) & (df["Fecha vuelo"] != fecha_sel)].copy(),
             FLIGHT_TIMES
         )
-
         if len(hist) >= 5 and cls in hist.columns:
             hist = hist.sort_values("hours_before", ascending=False)
-
-            # Proyección: forma normalizada de la curva histórica
-            # Escala la forma histórica para que parta de current_val
             from numpy import interp
-
             flight_dow = flight_date_parsed.strftime("%a") if pd.notna(flight_date_parsed) else None
             hist_dow = hist[hist["dow"] == flight_dow].copy() if (
                 flight_dow and "dow" in hist.columns and
                 len(hist[hist["dow"] == flight_dow]) >= 3
             ) else hist.copy()
-
             hist_dow["bucket"] = (hist_dow["hours_before"] / 12).round() * 12
             buckets = hist_dow.groupby("bucket")[cls].agg(["mean","std","count"]).reset_index()
-            buckets = buckets.sort_values("bucket", ascending=True)  # 0 a max
+            buckets = buckets.sort_values("bucket", ascending=True)
             buckets["std"] = buckets["std"].fillna(0)
-
             n_proj = 40
             proj_hours = np.linspace(hours_now, 0, n_proj)
             valid_proj = False
             n_hist_dates = len(hist_dow["Fecha vuelo"].unique())
-
             if len(buckets) >= 3:
                 b_xs   = buckets["bucket"].values.astype(float)
                 b_mean = buckets["mean"].values.astype(float)
                 b_std  = buckets["std"].values.astype(float)
-
-                # Valor histórico en hours_now y al cierre (h=0)
                 hist_at_now   = float(np.clip(interp(hours_now, b_xs, b_mean), 0.001, 7))
                 hist_at_close = float(np.clip(interp(0, b_xs, b_mean), 0, 7))
-
-                # Forma histórica en los puntos proyectados
                 hist_at_proj = interp(proj_hours, b_xs, b_mean)
                 std_at_proj  = np.clip(interp(proj_hours, b_xs, b_std), 0, 3)
-
-                # Normalizar: escalar la forma histórica para que en hours_now = current_val
-                # y al cierre = current_val * (hist_close / hist_now)
                 scale = current_val / hist_at_now if hist_at_now > 0 else 1.0
                 proj_smooth = np.clip(hist_at_proj * scale, 0, 7)
                 proj_upper  = np.clip((hist_at_proj + 1.28 * std_at_proj) * scale, 0, 7)
                 proj_lower  = np.clip((hist_at_proj - 1.28 * std_at_proj) * scale, 0, 7)
-
-                # Anclar primer punto exactamente al valor actual
                 proj_smooth[0] = float(current_val)
                 proj_upper[0]  = float(np.clip(current_val * (1 + 1.28 * float(interp(hours_now, b_xs, b_std)) / hist_at_now), 0, 7))
                 proj_lower[0]  = float(np.clip(current_val * (1 - 1.28 * float(interp(hours_now, b_xs, b_std)) / hist_at_now), 0, 7))
-
-                # Usar horas antes del vuelo como eje X (igual que Curva vs tiempo)
                 ev_traces.append({
                     "x": proj_hours.tolist() + proj_hours.tolist()[::-1],
                     "y": proj_upper.tolist() + proj_lower.tolist()[::-1],
@@ -703,26 +605,18 @@ else:
                     "hovertemplate": "%{text}<extra>Proyección</extra>",
                 })
                 valid_proj = True
-
                 if n_hist_dates < 4:
                     st.warning(f"⚠️ Proyección basada en solo {n_hist_dates} fecha(s) histórica(s) del mismo día — alta incertidumbre.")
-                # Probabilidad: usar directamente el valor proyectado al cierre (h=0)
-                # y la banda de confianza — consistente con la curva visual
-                proj_at_close = float(proj_smooth[-1])  # valor proyectado en h=0
-                ci_lower_at_close = float(proj_lower[-1])  # límite inferior IC 80%
-                ci_upper_at_close = float(proj_upper[-1])  # límite superior IC 80%
-
-                # Probabilidad empírica: asumiendo distribución normal entre lower y upper
-                # P(J >= cupos_min) basado en el rango de la proyección
+                proj_at_close = float(proj_smooth[-1])
+                ci_lower_at_close = float(proj_lower[-1])
+                ci_upper_at_close = float(proj_upper[-1])
                 if ci_upper_at_close > ci_lower_at_close:
-                    # Fraction of the CI that lies above cupos_min
                     range_ci = ci_upper_at_close - ci_lower_at_close
                     above = max(0, ci_upper_at_close - cupos_min)
                     prob = min(1.0, above / range_ci) if range_ci > 0 else (1.0 if proj_at_close >= cupos_min else 0.0)
                 else:
                     prob = 1.0 if proj_at_close >= cupos_min else 0.0
                 n_hist = n_hist_dates
-
     ev_layout = {
         "height": 400,
         "xaxis": {
@@ -745,7 +639,6 @@ else:
         "paper_bgcolor": "rgba(0,0,0,0)",
     }
     st.plotly_chart({"data": ev_traces, "layout": ev_layout}, use_container_width=True)
-
     if is_future and prob is not None:
         pct = int(round(prob * 100))
         if pct >= 70:
@@ -761,7 +654,6 @@ else:
         )
     elif not is_future:
         st.caption("Vuelo ya ocurrido — mostrando el historial real completo.")
-
     with st.expander("Ver todas las lecturas"):
         tbl2 = sub[["Timestamp consulta", cls, "Fecha vuelo"]].copy()
         tbl2["Timestamp consulta"] = tbl2["Timestamp consulta"].dt.strftime("%d/%m/%Y %H:%M")
